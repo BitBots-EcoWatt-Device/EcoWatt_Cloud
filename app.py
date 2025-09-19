@@ -3,6 +3,31 @@ from datetime import datetime
 import os
 import json
 
+# Delta decompression function
+def delta_decode(deltas):
+    """
+    Decode delta-encoded values back to original values.
+    This is the inverse of the deltaEncode function used on the device.
+    """
+    if not deltas:
+        return []
+    
+    # First value is the original value, rest are deltas
+    decoded = [deltas[0]]
+    
+    for i in range(1, len(deltas)):
+        # Add the delta to the previous decoded value
+        decoded.append(decoded[-1] + deltas[i])
+    
+    return decoded
+
+def scale_back_float(scaled_int, scale):
+    """
+    Convert scaled integer back to float value.
+    This reverses the scaleFloat function used on the device.
+    """
+    return scaled_int / (10.0 ** scale)
+
 app = Flask(__name__)
 
 # In-memory database substitute
@@ -116,6 +141,44 @@ def index():
             .links a:hover {
                 text-decoration: underline;
             }
+            .field-card {
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 15px;
+                margin: 10px;
+                background-color: #f9f9f9;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .field-card h4 {
+                color: #007bff;
+                margin: 0 0 10px 0;
+                border-bottom: 1px solid #ddd;
+                padding-bottom: 5px;
+            }
+            .field-details div {
+                margin: 5px 0;
+                font-size: 14px;
+            }
+            .payload-section {
+                background-color: #e8f4f8;
+                padding: 10px;
+                border-radius: 5px;
+                margin-top: 10px;
+                border-left: 4px solid #007bff;
+            }
+            .original-values {
+                background-color: #e8f5e8;
+                padding: 8px;
+                border-radius: 3px;
+                margin-top: 5px;
+                border-left: 3px solid #28a745;
+                font-weight: bold;
+            }
+            .fields-container {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
         </style>
     </head>
     <body>
@@ -166,11 +229,45 @@ def index():
                 return new Date().toLocaleTimeString();
             }
             
-            function createFieldsDisplay(fields) {
-                let html = '<div class="field-details">';
-                for (let fieldName in fields) {
-                    const field = fields[fieldName];
-                    html += `<strong>${fieldName}:</strong> ${field.method} (${field.bytes_len}B, ${field.cpu_time_ms}ms)<br>`;
+                        function createFieldsDisplay(fields) {
+                let html = '<div class="fields-container">';
+                for (const [fieldName, fieldData] of Object.entries(fields)) {
+                    html += `
+                        <div class="field-card">
+                            <h4>${fieldName}</h4>
+                            <div class="field-details">
+                                <div><strong>Method:</strong> ${fieldData.method}</div>
+                                <div><strong>Param ID:</strong> ${fieldData.param_id}</div>
+                                <div><strong>Samples:</strong> ${fieldData.n_samples}</div>
+                                <div><strong>Bytes Length:</strong> ${fieldData.bytes_len}</div>
+                                <div><strong>CPU Time:</strong> ${fieldData.cpu_time_ms.toFixed(6)} ms</div>
+                    `;
+                    
+                    if (fieldData.payload) {
+                        html += `
+                                <div class="payload-section">
+                                    <div><strong>Compressed Payload:</strong> [${fieldData.payload.join(', ')}]</div>
+                        `;
+                        
+                        if (fieldData.decompressed_payload) {
+                            html += `
+                                    <div><strong>Decompressed Values:</strong> [${fieldData.decompressed_payload.join(', ')}]</div>
+                            `;
+                        }
+                        
+                        if (fieldData.original_values) {
+                            html += `
+                                    <div class="original-values"><strong>Original Values:</strong> [${fieldData.original_values.map(v => v.toFixed(3)).join(', ')}]</div>
+                            `;
+                        }
+                        
+                        html += `</div>`;
+                    }
+                    
+                    html += `
+                            </div>
+                        </div>
+                    `;
                 }
                 html += '</div>';
                 return html;
@@ -252,17 +349,35 @@ def upload_data():
         if not payload:
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
-        # Store the entire payload as received from device
+        # Process and decompress the payload if it contains fields with payload data
+        processed_payload = payload.copy()
+        if "fields" in payload:
+            for field_name, field_data in payload["fields"].items():
+                if "payload" in field_data and field_data["payload"]:
+                    # Decompress the delta-encoded payload
+                    compressed_payload = field_data["payload"]
+                    decompressed_values = delta_decode(compressed_payload)
+                    
+                    # Assuming scale factor of 3 for voltage/current/frequency measurements
+                    # You may need to adjust this based on your device's scale factor
+                    scale = 3 if field_name in ["AC_VOLTAGE", "AC_CURRENT", "AC_FREQUENCY"] else 0
+                    original_values = [scale_back_float(val, scale) for val in decompressed_values]
+                    
+                    # Add decompressed data to the field
+                    processed_payload["fields"][field_name]["decompressed_payload"] = decompressed_values
+                    processed_payload["fields"][field_name]["original_values"] = original_values
+
+        # Store the processed payload with decompressed data
         record = {
             "received_at": datetime.utcnow().isoformat(),
-            "device_data": payload
+            "device_data": processed_payload
         }
         DATA_STORAGE.append(record)
 
         # If the payload contains compression report data, store it separately for easy access
-        if "fields" in payload:
+        if "fields" in processed_payload:
             # This looks like compression report data
-            COMPRESSION_REPORTS.append(payload)
+            COMPRESSION_REPORTS.append(processed_payload)
 
         # Reply with ACK and config stub
         return jsonify({
@@ -271,7 +386,8 @@ def upload_data():
             "next_config": {
                 "upload_interval": 15,  # minutes
                 "sampling_rate": 5,     # seconds
-            }
+            },
+            "decompression_status": "success" if "fields" in payload else "no_compression_data"
         })
 
     except Exception as e:
@@ -318,29 +434,38 @@ def compression_display():
         # Sample compression report data (fallback when no device data received)
         display_data = {
             "device_id": "002",
-            "timestamp": 13409,
+            "timestamp": 27379,
             "fields": {
-                "AC_VOLTAGE": {
-                    "method": "Delta",
-                    "param_id": 0,
-                    "n_samples": 1,
-                    "bytes_len": 1,
-                    "cpu_time_ms": 0.000179
-                },
-                "AC_CURRENT": {
-                    "method": "Delta", 
-                    "param_id": 1,
-                    "n_samples": 1,
-                    "bytes_len": 1,
-                    "cpu_time_ms": 0.000133
-                },
-                "AC_FREQUENCY": {
-                    "method": "Delta",
-                    "param_id": 2, 
-                    "n_samples": 1,
-                    "bytes_len": 1,
-                    "cpu_time_ms": 0.00013
-                }
+                    "AC_VOLTAGE": {
+                        "method": "Delta",
+                        "param_id": 0,
+                        "n_samples": 1,
+                        "bytes_len": 1,
+                        "cpu_time_ms": 0.000338,
+                        "payload": [230800],
+                        "decompressed_payload": [230800],
+                        "original_values": [230.8]
+                    },
+                    "AC_CURRENT": {
+                        "method": "Delta",
+                        "param_id": 1,
+                        "n_samples": 1,
+                        "bytes_len": 1,
+                        "cpu_time_ms": 0.000160,
+                        "payload": [0],
+                        "decompressed_payload": [0],
+                        "original_values": [0.0]
+                    },
+                    "AC_FREQUENCY": {
+                        "method": "Delta",
+                        "param_id": 2,
+                        "n_samples": 1,
+                        "bytes_len": 1,
+                        "cpu_time_ms": 0.000128,
+                        "payload": [50070],
+                        "decompressed_payload": [50070],
+                        "original_values": [50.07]
+                    }
             }
         }
         data_source = "Sample Data (No device data received yet)"
@@ -398,7 +523,7 @@ def compression_display():
             <p>Example using curl:</p>
             <pre style="background-color: #e9ecef; padding: 10px; border-radius: 3px; font-size: 12px;">curl -X POST http://localhost:5000/upload \\
   -H "Content-Type: application/json" \\
-  -d '{{"device_id":"002","timestamp":13409,"fields":{{"AC_VOLTAGE":{{"method":"Delta","param_id":0,"n_samples":1,"bytes_len":1,"cpu_time_ms":0.000179}}}}}}'</pre>
+  -d '{{"device_id":"002","timestamp":27379,"fields":{{"AC_VOLTAGE":{{"method":"Delta","param_id":0,"n_samples":1,"bytes_len":1,"cpu_time_ms":0.000338,"payload":[230800]}}}}}}'</pre>
         </div>
     </body>
     </html>
