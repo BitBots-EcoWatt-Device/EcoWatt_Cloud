@@ -1,38 +1,151 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import json
+from collections import defaultdict
+
+# Sri Lanka timezone (GMT+5:30)
+SRI_LANKA_TZ = timezone(timedelta(hours=5, minutes=30))
 
 # Delta decompression function
 def delta_decode(deltas):
-    """
-    Decode delta-encoded values back to original values.
-    This is the inverse of the deltaEncode function used on the device.
-    """
     if not deltas:
         return []
-    
-    # First value is the original value, rest are deltas
     decoded = [deltas[0]]
-    
     for i in range(1, len(deltas)):
-        # Add the delta to the previous decoded value
         decoded.append(decoded[-1] + deltas[i])
-    
     return decoded
 
 def scale_back_float(scaled_int, scale):
-    """
-    Convert scaled integer back to float value.
-    This reverses the scaleFloat function used on the device.
-    """
     return scaled_int / (10.0 ** scale)
 
 app = Flask(__name__)
 
 # In-memory database substitute
-DATA_STORAGE = []
-COMPRESSION_REPORTS = []
+DATA_STORAGE = []         # Full raw records with device_data
+COMPRESSION_REPORTS = []  # Processed payloads (possibly chunked)
+
+
+def _group_uploads_by_session():
+    """
+    Group possibly chunked uploads by (session_id, window_start_ms, window_end_ms).
+    Falls back to unique keys if session metadata is missing.
+    Returns a list of combined upload dicts with merged fields.
+    """
+    groups = {}
+    order = []
+    for payload in COMPRESSION_REPORTS:
+        # Determine grouping key
+        sid = payload.get("session_id")
+        wstart = payload.get("window_start_ms")
+        wend = payload.get("window_end_ms")
+        if sid is not None:
+            key = (sid, wstart, wend)
+        else:
+            # Fallback: device_id + timestamp
+            key = (payload.get("device_id"), payload.get("timestamp"))
+
+        if key not in groups:
+            groups[key] = {
+                "device_id": payload.get("device_id"),
+                "timestamp": payload.get("timestamp"),
+                "received_at": None,
+                "session_id": sid,
+                "window_start_ms": wstart,
+                "window_end_ms": wend,
+                "poll_count": payload.get("poll_count"),
+                "fields": {},
+            }
+            order.append(key)
+
+        # Merge fields from chunks
+        fields = payload.get("fields", {})
+        groups[key]["fields"].update(fields)
+
+    return [groups[k] for k in order]
+
+
+def _compute_upload_benchmark(upload):
+    """
+    Compute per-upload benchmark metrics:
+      - compression_method (from first field if present)
+      - number_of_samples (from poll_count or inferred)
+      - original_payload_size_bytes (sum of decompressed ints * 4)
+      - compressed_payload_size_bytes (sum of field.bytes_len)
+      - compression_ratio (orig / compressed)
+      - cpu_time_ms_total (sum)
+      - verify_ok (all fields True or decompression present)
+    """
+    fields = upload.get("fields", {})
+    method = None
+    # Prefer device-provided totals if available (single-chunk or window totals)
+    total_orig = int(upload.get("original_payload_size_bytes_total") or 0)
+    total_comp = int(upload.get("compressed_payload_size_bytes_total") or 0)
+    total_cpu = float(upload.get("cpu_time_ms_total") or upload.get("cpu_time_ms_total_window") or 0.0)
+    all_ok = bool(upload.get("verify_ok_all") or upload.get("verify_ok_all_window") or True)
+    inferred_samples = 0
+
+    for name, f in fields.items():
+        if method is None:
+            method = f.get("method", "Delta")
+        n = int(f.get("n_samples", 0))
+        if n > inferred_samples:
+            inferred_samples = n
+
+        # If device totals are missing, compute per-field and sum
+        if total_comp == 0:
+            comp = int(f.get("bytes_len", 0))
+            if comp <= 0:
+                comp = 4 * len(f.get("payload", []))
+            total_comp += comp
+
+        if total_orig == 0:
+            f_orig = int(f.get("original_bytes") or 0)
+            if f_orig == 0:
+                decomp = f.get("decompressed_payload")
+                if decomp is None:
+                    try:
+                        decomp = delta_decode(f.get("payload", []))
+                    except Exception:
+                        decomp = []
+                f_orig = 4 * len(decomp)
+            total_orig += f_orig
+
+        # CPU time accumulation if total not provided
+        if upload.get("cpu_time_ms_total") is None and upload.get("cpu_time_ms_total_window") is None:
+            total_cpu += float(f.get("cpu_time_ms", 0.0))
+
+        # verify accumulation if not provided
+        if upload.get("verify_ok_all") is None and upload.get("verify_ok_all_window") is None:
+            vflag = f.get("verify_ok")
+            if vflag is None:
+                decomp = f.get("decompressed_payload")
+                if decomp is None:
+                    try:
+                        decomp = delta_decode(f.get("payload", []))
+                    except Exception:
+                        decomp = []
+                vflag = len(decomp) == n if n else len(decomp) > 0
+            all_ok = all_ok and bool(vflag)
+
+    poll_count = int(upload.get("poll_count") or inferred_samples)
+    ratio = (float(total_orig) / float(total_comp)) if total_comp > 0 else None
+
+    return {
+        "received_at": upload.get("received_at"),
+        "device_id": upload.get("device_id", "Unknown"),
+        "session_id": upload.get("session_id"),
+        "window_start_ms": upload.get("window_start_ms"),
+        "window_end_ms": upload.get("window_end_ms"),
+        "compression_method": method or "Delta",
+        "number_of_samples": poll_count,
+        "original_payload_size_bytes": total_orig,
+        "compressed_payload_size_bytes": total_comp,
+        "compression_ratio": ratio,
+        "cpu_time_ms_total": total_cpu,
+        "verify_ok": all_ok,
+    }
+
 
 @app.route("/")
 def index():
@@ -42,298 +155,143 @@ def index():
     <head>
         <title>EcoWatt Cloud - Device Data Monitor</title>
         <style>
-            body { 
-                font-family: Arial, sans-serif; 
-                margin: 20px; 
-                background-color: #f5f5f5;
-            }
-            .header {
-                background-color: #2c3e50;
-                color: white;
-                padding: 20px;
-                border-radius: 10px;
-                margin-bottom: 20px;
-            }
-            .status { 
-                color: #27ae60; 
-                font-weight: bold; 
-                font-size: 18px;
-            }
-            .stats {
-                background-color: white;
-                padding: 15px;
-                border-radius: 8px;
-                margin-bottom: 20px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .table-container {
-                background-color: white;
-                padding: 20px;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                margin-bottom: 20px;
-            }
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 10px;
-            }
-            th, td {
-                padding: 12px;
-                text-align: left;
-                border-bottom: 1px solid #ddd;
-            }
-            th {
-                background-color: #3498db;
-                color: white;
-                font-weight: bold;
-            }
-            tr:hover {
-                background-color: #f5f5f5;
-            }
-            .field-details {
-                font-size: 11px;
-                color: #666;
-                max-width: 200px;
-                word-wrap: break-word;
-            }
-            .timestamp {
-                font-family: monospace;
-                font-size: 11px;
-            }
-            .device-id {
-                font-weight: bold;
-                color: #e74c3c;
-            }
-            .no-data {
-                text-align: center;
-                color: #7f8c8d;
-                padding: 40px;
-                font-style: italic;
-            }
-            .refresh-indicator {
-                position: fixed;
-                top: 10px;
-                right: 10px;
-                background-color: #27ae60;
-                color: white;
-                padding: 5px 10px;
-                border-radius: 15px;
-                font-size: 12px;
-                opacity: 0;
-                transition: opacity 0.3s;
-            }
-            .refresh-indicator.show {
-                opacity: 1;
-            }
-            .links {
-                background-color: white;
-                padding: 15px;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .links a {
-                margin: 0 15px 0 0;
-                text-decoration: none;
-                color: #3498db;
-                font-weight: bold;
-            }
-            .links a:hover {
-                text-decoration: underline;
-            }
-            .field-card {
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                padding: 15px;
-                margin: 10px;
-                background-color: #f9f9f9;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .field-card h4 {
-                color: #007bff;
-                margin: 0 0 10px 0;
-                border-bottom: 1px solid #ddd;
-                padding-bottom: 5px;
-            }
-            .field-details div {
-                margin: 5px 0;
-                font-size: 14px;
-            }
-            .payload-section {
-                background-color: #e8f4f8;
-                padding: 10px;
-                border-radius: 5px;
-                margin-top: 10px;
-                border-left: 4px solid #007bff;
-            }
-            .original-values {
-                background-color: #e8f5e8;
-                padding: 8px;
-                border-radius: 3px;
-                margin-top: 5px;
-                border-left: 3px solid #28a745;
-                font-weight: bold;
-            }
-            .fields-container {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 10px;
-            }
+            :root { --brand:#2c3e50; --accent:#3498db; --ok:#27ae60; --panel:#ffffff; --muted:#7f8c8d; }
+            body { font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }
+            .header { background-color: var(--brand); color: white; padding: 24px; display:flex; align-items:center; justify-content:space-between; }
+            .header h1 { margin:0; font-size: 22px; }
+            .btn { background: var(--accent); color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }
+            .container { padding: 20px; }
+            .status { color: var(--ok); font-weight: bold; font-size: 14px; }
+            .cards { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin: 20px 0; }
+            .card { background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }
+            .table-container { background:var(--panel); padding: 16px; border-radius: 12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }
+            table { width:100%; border-collapse: collapse; }
+            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background-color: #eef6ff; color: #333; }
+            .device-id { font-weight: bold; color: #e74c3c; }
+            .fields-container { display: flex; flex-wrap: wrap; gap: 10px; }
+            .field-card { border: 1px solid #eee; border-radius: 8px; padding: 12px; background-color: #fafafa; }
+            .field-card h4 { color: var(--accent); margin: 0 0 6px 0; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+            .field-details div { margin: 4px 0; font-size: 13px; color:#444; }
+            .payload-section { background-color: #f0f7fb; padding: 8px; border-radius: 5px; margin-top: 8px; border-left: 4px solid var(--accent); font-size:12px; }
+            .original-values { background-color: #e8f5e8; padding: 6px; border-radius: 3px; margin-top: 5px; border-left: 3px solid #28a745; font-weight: bold; font-size:12px; }
+            .muted { color: var(--muted); font-size:12px; }
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🔋 EcoWatt Cloud - Device Data Monitor</h1>
-            <p class="status">✅ Backend Running</p>
-        </div>
-        
-        <div class="stats">
-            <h3>📊 Live Statistics</h3>
-            <p><strong>Total Reports Received:</strong> <span id="totalReports">0</span></p>
-            <p><strong>Last Update:</strong> <span id="lastUpdate">Never</span></p>
-            <p><strong>Auto-refresh:</strong> Every 2 seconds</p>
-        </div>
-        
-        <div class="table-container">
-            <h3>📡 Latest Device Compression Reports</h3>
-            <div id="tableContent">
-                <div class="no-data">
-                    Waiting for device data... Send JSON data to <code>POST /upload</code>
-                </div>
+            <div>
+                <a class="btn" href="/benchmarks">View Benchmarks</a>
             </div>
         </div>
-        
-        <div class="links">
-            <h3>🔗 Quick Links</h3>
-            <a href="/compression_display">📊 Detailed View</a>
-            <a href="/compression_report">📝 Raw JSON API</a>
-            <a href="/api/latest_data">🔌 Live Data API</a>
+        <div class="container">
+            <div class="cards">
+                <div class="card"><div class="status">Backend Running</div><div class="muted">Auto-refresh every 2s</div></div>
+                <div class="card"><div><strong>Total Reports Received</strong></div><div id="totalReports">0</div></div>
+                <div class="card"><div><strong>Last Update</strong></div><div id="lastUpdate">Never</div></div>
+            </div>
+            <div class="table-container">
+                <h3>Latest Device Compression Reports</h3>
+                <div id="tableContent"><div class="muted">Waiting for device data... Send JSON to POST /upload</div></div>
+            </div>
         </div>
-        
-        <div class="refresh-indicator" id="refreshIndicator">
-            🔄 Updating...
-        </div>
-        
+
         <script>
-            let lastUpdateTime = 0;
-            
-            function showRefreshIndicator() {
-                const indicator = document.getElementById('refreshIndicator');
-                indicator.classList.add('show');
-                setTimeout(() => {
-                    indicator.classList.remove('show');
-                }, 1000);
+            function formatTimestamp(isoString) { 
+                try { 
+                    if (!isoString) return '—';
+                    // Parse the ISO string and format for Sri Lanka timezone
+                    const date = new Date(isoString);
+                    return date.toLocaleString('en-US', {
+                        timeZone: 'Asia/Colombo',
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: false
+                    });
+                } catch(e) { 
+                    return '—'; 
+                } 
             }
-            
-            function formatTimestamp(timestamp) {
-                return new Date().toLocaleTimeString();
-            }
-            
-                        function createFieldsDisplay(fields) {
+            function createFieldsDisplay(fields) {
                 let html = '<div class="fields-container">';
-                for (const [fieldName, fieldData] of Object.entries(fields)) {
+                for (const [fieldName, fieldData] of Object.entries(fields || {})) {
                     html += `
                         <div class="field-card">
                             <h4>${fieldName}</h4>
                             <div class="field-details">
-                                <div><strong>Method:</strong> ${fieldData.method}</div>
-                                <div><strong>Param ID:</strong> ${fieldData.param_id}</div>
-                                <div><strong>Samples:</strong> ${fieldData.n_samples}</div>
-                                <div><strong>Bytes Length:</strong> ${fieldData.bytes_len}</div>
-                                <div><strong>CPU Time:</strong> ${fieldData.cpu_time_ms.toFixed(6)} ms</div>
+                                <div><strong>Samples:</strong> ${fieldData.n_samples ?? '—'}</div>
+                                <div><strong>Method:</strong> ${fieldData.method ?? '—'}</div>
                     `;
-                    
                     if (fieldData.payload) {
                         html += `
                                 <div class="payload-section">
                                     <div><strong>Compressed Payload:</strong> [${fieldData.payload.join(', ')}]</div>
                         `;
-                        
                         if (fieldData.decompressed_payload) {
-                            html += `
-                                    <div><strong>Decompressed Values:</strong> [${fieldData.decompressed_payload.join(', ')}]</div>
-                            `;
+                            html += `<div><strong>Decompressed:</strong> [${fieldData.decompressed_payload.join(', ')}]</div>`;
                         }
-                        
                         if (fieldData.original_values) {
-                            html += `
-                                    <div class="original-values"><strong>Original Values:</strong> [${fieldData.original_values.map(v => v.toFixed(3)).join(', ')}]</div>
-                            `;
+                            html += `<div class="original-values"><strong>Original:</strong> [${fieldData.original_values.map(v => v.toFixed(3)).join(', ')}]</div>`;
                         }
-                        
                         html += `</div>`;
                     }
-                    
-                    html += `
-                            </div>
-                        </div>
-                    `;
+                    html += `</div></div>`;
                 }
                 html += '</div>';
                 return html;
             }
-            
+
             function updateTable(data) {
                 const tableContent = document.getElementById('tableContent');
                 const totalReports = document.getElementById('totalReports');
                 const lastUpdate = document.getElementById('lastUpdate');
-                
                 if (data.data && data.data.length > 0) {
                     let tableHTML = `
                         <table>
                             <thead>
                                 <tr>
                                     <th>Device ID</th>
-                                    <th>Timestamp</th>
+                                    <th>Device Timestamp</th>
                                     <th>Fields Summary</th>
-                                    <th>Received At</th>
+                                    <th>Server Received At</th>
                                 </tr>
                             </thead>
                             <tbody>
                     `;
-                    
-                    // Show latest reports first
-                    data.data.reverse().forEach(report => {
+                    data.data.slice().reverse().forEach(report => {
                         const fieldsCount = Object.keys(report.fields || {}).length;
                         tableHTML += `
                             <tr>
                                 <td class="device-id">${report.device_id || 'Unknown'}</td>
                                 <td class="timestamp">${report.timestamp || 'N/A'}</td>
                                 <td>
-                                    <strong>${fieldsCount} fields:</strong><br>
+                                    <strong>${fieldsCount} fields</strong><br>
                                     ${createFieldsDisplay(report.fields || {})}
                                 </td>
-                                <td class="timestamp">${formatTimestamp()}</td>
+                                <td class="timestamp">${formatTimestamp(report.received_at)}</td>
                             </tr>
                         `;
                     });
-                    
                     tableHTML += '</tbody></table>';
                     tableContent.innerHTML = tableHTML;
                 } else {
-                    tableContent.innerHTML = '<div class="no-data">No device data received yet. Waiting for JSON data...</div>';
+                    tableContent.innerHTML = '<div class="muted">No device data received yet. Waiting for JSON data...</div>';
                 }
-                
                 totalReports.textContent = data.total_reports || 0;
-                lastUpdate.textContent = formatTimestamp();
+                const latestTime = data.data && data.data.length > 0 ? data.data[data.data.length - 1].received_at : null;
+                lastUpdate.textContent = formatTimestamp(latestTime);
             }
-            
+
             function fetchLatestData() {
-                showRefreshIndicator();
                 fetch('/api/latest_data')
-                    .then(response => response.json())
-                    .then(data => {
-                        updateTable(data);
-                    })
-                    .catch(error => {
-                        console.error('Error fetching data:', error);
-                    });
+                    .then(r => r.json()).then(updateTable).catch(console.error);
             }
-            
-            // Initial load
             fetchLatestData();
-            
-            // Auto-refresh every 2 seconds
             setInterval(fetchLatestData, 2000);
         </script>
     </body>
@@ -341,7 +299,7 @@ def index():
     """
     return html
 
-# Device uploads compressed data every 15 min
+
 @app.route("/upload", methods=["POST"])
 def upload_data():
     try:
@@ -349,42 +307,40 @@ def upload_data():
         if not payload:
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
-        # Process and decompress the payload if it contains fields with payload data
-        processed_payload = payload.copy()
+        processed_payload = dict(payload)
+        # Decompress each field into decompressed_payload and original_values
         if "fields" in payload:
             for field_name, field_data in payload["fields"].items():
                 if "payload" in field_data and field_data["payload"]:
-                    # Decompress the delta-encoded payload
                     compressed_payload = field_data["payload"]
                     decompressed_values = delta_decode(compressed_payload)
-                    
-                    # Assuming scale factor of 3 for voltage/current/frequency measurements
-                    # You may need to adjust this based on your device's scale factor
                     scale = 3 if field_name in ["AC_VOLTAGE", "AC_CURRENT", "AC_FREQUENCY"] else 0
                     original_values = [scale_back_float(val, scale) for val in decompressed_values]
-                    
-                    # Add decompressed data to the field
+                    processed_payload.setdefault("fields", {}).setdefault(field_name, {})
                     processed_payload["fields"][field_name]["decompressed_payload"] = decompressed_values
                     processed_payload["fields"][field_name]["original_values"] = original_values
 
-        # Store the processed payload with decompressed data
+        # Get current time in Sri Lanka timezone
+        sri_lanka_time = datetime.now(SRI_LANKA_TZ)
         record = {
-            "received_at": datetime.utcnow().isoformat(),
+            "received_at": sri_lanka_time.isoformat(),
             "device_data": processed_payload
         }
         DATA_STORAGE.append(record)
 
-        # If the payload contains compression report data, store it separately for easy access
         if "fields" in processed_payload:
-            # This looks like compression report data
-            COMPRESSION_REPORTS.append(processed_payload)
+            # Save a flattened copy (without wrapping) for easy grouping
+            flat = dict(processed_payload)
+            # keep received time for grouping output if desired
+            flat["received_at"] = record["received_at"]
+            COMPRESSION_REPORTS.append(flat)
 
-        # Reply with ACK and config stub
         return jsonify({
             "status": "ok",
             "ack_time": record["received_at"],
+            "server_time_zone": "Asia/Colombo (GMT+5:30)",
             "next_config": {
-                "upload_interval": 15,  # minutes
+                "upload_interval": 15,  # minutes (advisory for demo)
                 "sampling_rate": 5,     # seconds
             },
             "decompression_status": "success" if "fields" in payload else "no_compression_data"
@@ -393,17 +349,15 @@ def upload_data():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Endpoint for clients to view uploaded inverter data
+
 @app.route("/data", methods=["GET"])
 def get_data():
     return jsonify(DATA_STORAGE)
 
-# API endpoint to get latest device data for dynamic table
+
 @app.route("/api/latest_data", methods=["GET"])
 def get_latest_data():
-    """Returns the latest device compression reports for the dynamic table"""
     if COMPRESSION_REPORTS:
-        # Return the last 10 reports for the table
         latest_reports = COMPRESSION_REPORTS[-10:]
         return jsonify({
             "status": "success",
@@ -412,67 +366,35 @@ def get_latest_data():
         })
     else:
         return jsonify({
-            "status": "no_data", 
+            "status": "no_data",
             "data": [],
             "total_reports": 0
         })
 
-# Endpoint to fetch compression benchmark results
+
 @app.route("/compression_report", methods=["GET"])
 def get_compression_reports():
     return jsonify(COMPRESSION_REPORTS)
 
-# Endpoint to display compression reports in browser
+
 @app.route("/compression_display")
 def compression_display():
-    # Use actual device data if available, otherwise show sample data
+    # Fallback to sample if no data
     if COMPRESSION_REPORTS:
-        # Show the most recent compression report from a device
         display_data = COMPRESSION_REPORTS[-1]
         data_source = "Latest Device Data"
     else:
-        # Sample compression report data (fallback when no device data received)
         display_data = {
             "device_id": "002",
             "timestamp": 27379,
             "fields": {
-                    "AC_VOLTAGE": {
-                        "method": "Delta",
-                        "param_id": 0,
-                        "n_samples": 1,
-                        "bytes_len": 1,
-                        "cpu_time_ms": 0.000338,
-                        "payload": [230800],
-                        "decompressed_payload": [230800],
-                        "original_values": [230.8]
-                    },
-                    "AC_CURRENT": {
-                        "method": "Delta",
-                        "param_id": 1,
-                        "n_samples": 1,
-                        "bytes_len": 1,
-                        "cpu_time_ms": 0.000160,
-                        "payload": [0],
-                        "decompressed_payload": [0],
-                        "original_values": [0.0]
-                    },
-                    "AC_FREQUENCY": {
-                        "method": "Delta",
-                        "param_id": 2,
-                        "n_samples": 1,
-                        "bytes_len": 1,
-                        "cpu_time_ms": 0.000128,
-                        "payload": [50070],
-                        "decompressed_payload": [50070],
-                        "original_values": [50.07]
-                    }
+                "AC_VOLTAGE": {"method": "Delta", "param_id": 0, "n_samples": 1, "bytes_len": 1, "cpu_time_ms": 0.000338, "payload": [230800], "decompressed_payload": [230800], "original_values": [230.8]},
+                "AC_CURRENT": {"method": "Delta", "param_id": 1, "n_samples": 1, "bytes_len": 1, "cpu_time_ms": 0.000160, "payload": [0], "decompressed_payload": [0], "original_values": [0.0]},
+                "AC_FREQUENCY": {"method": "Delta", "param_id": 2, "n_samples": 1, "bytes_len": 1, "cpu_time_ms": 0.000128, "payload": [50070], "decompressed_payload": [50070], "original_values": [50.07]}
             }
         }
         data_source = "Sample Data (No device data received yet)"
-    
-    # Convert to pretty JSON for display
     json_str = json.dumps(display_data, indent=2)
-    
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -480,61 +402,148 @@ def compression_display():
         <title>EcoWatt Compression Report</title>
         <style>
             body {{ font-family: Arial, sans-serif; margin: 40px; }}
-            .json-display {{ 
-                background-color: #f4f4f4; 
-                padding: 20px; 
-                border-radius: 5px; 
-                white-space: pre-wrap; 
-                font-family: monospace;
-                border: 1px solid #ddd;
-                font-size: 14px;
-            }}
-            h1 {{ color: #333; }}
-            .timestamp {{ color: #666; font-size: 0.9em; }}
-            .data-source {{ color: #007bff; font-weight: bold; margin-bottom: 15px; }}
+            .json-display {{ background-color: #f4f4f4; padding: 20px; border-radius: 5px; white-space: pre-wrap; font-family: monospace; border: 1px solid #ddd; font-size: 14px; }}
+            h1 {{ color: #333; }} .timestamp {{ color: #666; font-size: 0.9em; }} .data-source {{ color: #007bff; font-weight: bold; margin-bottom: 15px; }}
             .refresh-note {{ background-color: #e7f3ff; padding: 10px; border-radius: 5px; margin: 15px 0; }}
         </style>
-        <script>
-            // Auto-refresh every 5 seconds to show new device data
-            setTimeout(function(){{ window.location.reload(); }}, 5000);
-        </script>
+        <script> setTimeout(function(){{ window.location.reload(); }}, 5000); </script>
     </head>
     <body>
         <h1>EcoWatt Cloud - Compression Report Display</h1>
-        <p class="timestamp">Page generated at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
-        <p class="data-source">📊 {data_source}</p>
-        
-        <div class="refresh-note">
-            📡 This page auto-refreshes every 5 seconds to show new device data. 
-            Total reports received: {len(COMPRESSION_REPORTS)}
-        </div>
-        
+        <p class="timestamp">Page generated at: {datetime.now(SRI_LANKA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (Sri Lanka Time, GMT+5:30)</p>
+        <p class="data-source">{data_source}</p>
+        <div class="refresh-note">This page auto-refreshes every 5 seconds to show new device data. Total reports received: {len(COMPRESSION_REPORTS)}</div>
         <div class="json-display">{json_str}</div>
         <br>
-        <p>
-            <a href="/">← Back to Home</a> | 
-            <a href="/compression_report">View Raw JSON API</a> |
-            <a href="/data">View All Device Data</a>
-        </p>
-        
-        <div style="margin-top: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
-            <h3>📝 For Device Testing:</h3>
-            <p>Send JSON data to: <code>POST /upload</code></p>
-            <p>Example using curl:</p>
-            <pre style="background-color: #e9ecef; padding: 10px; border-radius: 3px; font-size: 12px;">curl -X POST http://localhost:5000/upload \\
-  -H "Content-Type: application/json" \\
-  -d '{{"device_id":"002","timestamp":27379,"fields":{{"AC_VOLTAGE":{{"method":"Delta","param_id":0,"n_samples":1,"bytes_len":1,"cpu_time_ms":0.000338,"payload":[230800]}}}}}}'</pre>
+        <p><a href="/">← Back to Home</a></p>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route("/benchmarks")
+def benchmarks_page():
+    # Build combined uploads and compute metrics
+    combined = _group_uploads_by_session()
+    # inject received_at by matching in DATA_STORAGE (best-effort)
+    ra_by_signature = {}
+    for rec in DATA_STORAGE:
+        dd = rec.get("device_data", {})
+        key = (dd.get("session_id"), dd.get("window_start_ms"), dd.get("window_end_ms"))
+        ra_by_signature[key] = rec.get("received_at")
+    rows = []
+    for u in combined:
+        sig = (u.get("session_id"), u.get("window_start_ms"), u.get("window_end_ms"))
+        u["received_at"] = ra_by_signature.get(sig)
+        rows.append(_compute_upload_benchmark(u))
+
+    # Compute overall stats
+    total_uploads = len(rows)
+    avg_ratio = (sum([r["compression_ratio"] for r in rows if r["compression_ratio"]]) / max(1, len([r for r in rows if r["compression_ratio"]]))) if rows else 0
+    avg_orig = (sum([r["original_payload_size_bytes"] for r in rows]) / total_uploads) if total_uploads else 0
+    avg_comp = (sum([r["compressed_payload_size_bytes"] for r in rows]) / total_uploads) if total_uploads else 0
+    avg_cpu = (sum([r["cpu_time_ms_total"] for r in rows]) / total_uploads) if total_uploads else 0
+
+    # Helper function for formatting timestamps in benchmarks
+    def formatTimestamp(iso_string):
+        if not iso_string:
+            return '—'
+        try:
+            # Parse the ISO string and convert to Sri Lanka time if needed
+            dt = datetime.fromisoformat(iso_string.replace('Z', '+00:00'))
+            # If it's already in Sri Lanka timezone, use as is, otherwise convert
+            if dt.tzinfo is None:
+                # Assume it's already Sri Lanka time if no timezone info
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            elif dt.tzinfo.utcoffset(dt) == timedelta(hours=5, minutes=30):
+                # Already in Sri Lanka time
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                # Convert to Sri Lanka time
+                sri_lanka_time = dt.astimezone(SRI_LANKA_TZ)
+                return sri_lanka_time.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            return iso_string
+
+    # Build HTML
+    html_rows = "".join([
+        f"""
+        <tr>
+            <td>{formatTimestamp(r.get('received_at'))}</td>
+            <td>{r['device_id']}</td>
+            <td>{r.get('session_id') or '—'}</td>
+            <td>{r['number_of_samples']}</td>
+            <td>{r['original_payload_size_bytes']}</td>
+            <td>{r['compressed_payload_size_bytes']}</td>
+            <td>{f"{r['compression_ratio']:.2f}" if r['compression_ratio'] else '—'}</td>
+            <td>{f"{r['cpu_time_ms_total']:.3f}"}</td>
+            <td>{'✅' if r['verify_ok'] else '❌'}</td>
+            <td>{r['compression_method']}</td>
+        </tr>
+        """ for r in rows
+    ])
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>EcoWatt Benchmarks</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }}
+            .header {{ background:#2c3e50; color:#fff; padding:20px; display:flex; justify-content:space-between; align-items:center; }}
+            .btn {{ background:#3498db; color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }}
+            .container {{ padding:20px; }}
+            .cards {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:20px; }}
+            .card {{ background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }}
+            table {{ width:100%; border-collapse: collapse; background:#fff; box-shadow:0 6px 16px rgba(0,0,0,0.06); border-radius:12px; overflow:hidden; }}
+            th, td {{ padding: 10px 12px; border-bottom: 1px solid #eee; text-align:left; }}
+            th {{ background:#eef6ff; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h2>EcoWatt Compression Benchmarks</h2>
+            <a class="btn" href="/">← Back to Home</a>
+        </div>
+        <div class="container">
+            <div class="cards">
+                <div class="card"><div><strong>Total Uploads</strong></div><div>{total_uploads}</div></div>
+                <div class="card"><div><strong>Avg Compression Ratio</strong></div><div>{(f"{avg_ratio:.2f}" if avg_ratio else '—')}</div></div>
+                <div class="card"><div><strong>Avg Original Size (B)</strong></div><div>{int(avg_orig)}</div></div>
+                <div class="card"><div><strong>Avg Compressed Size (B)</strong></div><div>{int(avg_comp)}</div></div>
+                <div class="card"><div><strong>Avg CPU Time (ms)</strong></div><div>{avg_cpu:.3f}</div></div>
+            </div>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Server Received At</th>
+                        <th>Device</th>
+                        <th>Session</th>
+                        <th>Samples</th>
+                        <th>Original Bytes</th>
+                        <th>Compressed Bytes</th>
+                        <th>Ratio</th>
+                        <th>CPU ms (Total)</th>
+                        <th>Lossless</th>
+                        <th>Method</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {html_rows if html_rows else '<tr><td colspan="10">No uploads yet</td></tr>'}
+                </tbody>
+            </table>
         </div>
     </body>
     </html>
     """
     return html
 
-# Endpoint for remote config updates (future milestone)
+
 @app.route("/config", methods=["POST"])
 def set_config():
     config = request.json
-    # For now just echo back, in Milestone 4 you’d apply validation & persistence
     return jsonify({"status": "config_received", "applied_config": config})
 
 
