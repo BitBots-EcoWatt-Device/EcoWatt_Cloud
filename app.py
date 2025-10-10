@@ -25,6 +25,16 @@ app = Flask(__name__)
 DATA_STORAGE = []         # Full raw records with device_data
 COMPRESSION_REPORTS = []  # Processed payloads (possibly chunked)
 
+# NEW: In-memory stores for Milestone 4 features
+# Key: device_id, Value: dict of the config to be sent
+PENDING_CONFIGS = defaultdict(dict)
+# Key: device_id, Value: dict of the command to be sent
+PENDING_COMMANDS = defaultdict(dict)
+# Stores acknowledgment logs from devices
+CONFIG_LOGS = []
+# Stores command result logs from devices
+COMMAND_LOGS = []
+
 
 def _group_uploads_by_session():
     """
@@ -149,33 +159,91 @@ def _compute_upload_benchmark(upload):
 
 @app.route("/")
 def index():
+    # Format configuration logs
+    config_logs_html = ""
+    if CONFIG_LOGS:
+        config_logs_html = """
+        <table>
+            <thead>
+                <tr>
+                    <th>Device ID</th>
+                    <th>Acknowledgment Data</th>
+                    <th>Received At</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        for log in CONFIG_LOGS[-10:]:  # Show last 10 entries
+            config_logs_html += f"""
+                <tr>
+                    <td class="device-id">{log.get('device_id', 'Unknown')}</td>
+                    <td>{json.dumps(log.get('ack_data', {}), indent=2)}</td>
+                    <td>{log.get('received_at', 'N/A')}</td>
+                </tr>
+            """
+        config_logs_html += "</tbody></table>"
+    else:
+        config_logs_html = '<div class="muted">No configuration acknowledgments received yet.</div>'
+    
+    # Format command logs
+    command_logs_html = ""
+    if COMMAND_LOGS:
+        command_logs_html = """
+        <table>
+            <thead>
+                <tr>
+                    <th>Device ID</th>
+                    <th>Command Result</th>
+                    <th>Received At</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        for log in COMMAND_LOGS[-10:]:  # Show last 10 entries
+            command_logs_html += f"""
+                <tr>
+                    <td class="device-id">{log.get('device_id', 'Unknown')}</td>
+                    <td>{json.dumps(log.get('result_data', {}), indent=2)}</td>
+                    <td>{log.get('received_at', 'N/A')}</td>
+                </tr>
+            """
+        command_logs_html += "</tbody></table>"
+    else:
+        command_logs_html = '<div class="muted">No command execution results received yet.</div>'
+
     html = """
     <!DOCTYPE html>
     <html>
     <head>
         <title>EcoWatt Cloud - Device Data Monitor</title>
         <style>
-            :root { --brand:#2c3e50; --accent:#3498db; --ok:#27ae60; --panel:#ffffff; --muted:#7f8c8d; }
-            body { font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }
-            .header { background-color: var(--brand); color: white; padding: 24px; display:flex; align-items:center; justify-content:space-between; }
-            .header h1 { margin:0; font-size: 22px; }
-            .btn { background: var(--accent); color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }
-            .container { padding: 20px; }
-            .status { color: var(--ok); font-weight: bold; font-size: 14px; }
-            .cards { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin: 20px 0; }
-            .card { background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }
-            .table-container { background:var(--panel); padding: 16px; border-radius: 12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }
-            table { width:100%; border-collapse: collapse; }
-            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
-            th { background-color: #eef6ff; color: #333; }
-            .device-id { font-weight: bold; color: #e74c3c; }
-            .fields-container { display: flex; flex-wrap: wrap; gap: 10px; }
-            .field-card { border: 1px solid #eee; border-radius: 8px; padding: 12px; background-color: #fafafa; }
-            .field-card h4 { color: var(--accent); margin: 0 0 6px 0; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-            .field-details div { margin: 4px 0; font-size: 13px; color:#444; }
-            .payload-section { background-color: #f0f7fb; padding: 8px; border-radius: 5px; margin-top: 8px; border-left: 4px solid var(--accent); font-size:12px; }
-            .original-values { background-color: #e8f5e8; padding: 6px; border-radius: 3px; margin-top: 5px; border-left: 3px solid #28a745; font-weight: bold; font-size:12px; }
-            .muted { color: var(--muted); font-size:12px; }
+            :root {{ --brand:#2c3e50; --accent:#3498db; --ok:#27ae60; --panel:#ffffff; --muted:#7f8c8d; }}
+            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }}
+            .header {{ background-color: var(--brand); color: white; padding: 24px; display:flex; align-items:center; justify-content:space-between; }}
+            .header h1 {{ margin:0; font-size: 22px; }}
+            .btn {{ background: var(--accent); color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }}
+            .container {{ padding: 20px; }}
+            .status {{ color: var(--ok); font-weight: bold; font-size: 14px; }}
+            .cards {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin: 20px 0; }}
+            .card {{ background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }}
+            .table-container {{ background:var(--panel); padding: 16px; border-radius: 12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }}
+            table {{ width:100%; border-collapse: collapse; }}
+            th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }}
+            th {{ background-color: #eef6ff; color: #333; }}
+            .device-id {{ font-weight: bold; color: #e74c3c; }}
+            .fields-container {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+            .field-card {{ border: 1px solid #eee; border-radius: 8px; padding: 12px; background-color: #fafafa; }}
+            .field-card h4 {{ color: var(--accent); margin: 0 0 6px 0; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+            .field-details div {{ margin: 4px 0; font-size: 13px; color:#444; }}
+            .payload-section {{ background-color: #f0f7fb; padding: 8px; border-radius: 5px; margin-top: 8px; border-left: 4px solid var(--accent); font-size:12px; }}
+            .original-values {{ background-color: #e8f5e8; padding: 6px; border-radius: 3px; margin-top: 5px; border-left: 3px solid #28a745; font-weight: bold; font-size:12px; }}
+            .muted {{ color: var(--muted); font-size:12px; }}
+            /* NEW: Form styling */
+            form {{ margin: 0; }}
+            label {{ font-weight: bold; color: #333; margin-top: 8px; display: inline-block; }}
+            input[type="text"], input[type="number"], select {{ width: 100%; padding: 8px; margin: 4px 0 8px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
+            input[type="submit"] {{ background-color: var(--accent); color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 8px; }}
+            input[type="submit"]:hover {{ background-color: #2980b9; }}
         </style>
     </head>
     <body>
@@ -187,6 +255,34 @@ def index():
         </div>
         <div class="container">
             <div class="cards">
+                <div class="card">
+                    <h3>Set Device Configuration</h3>
+                    <form action="/set-config" method="POST">
+                        <label for="cfg_device_id">Device ID:</label><br>
+                        <input type="text" id="cfg_device_id" name="device_id" required><br><br>
+                        <label for="sampling_interval">Sampling Interval (ms):</label><br>
+                        <input type="number" id="sampling_interval" name="sampling_interval" value="5000" required><br><br>
+                        <label for="registers">Registers (comma-separated):</label><br>
+                        <input type="text" id="registers" name="registers" value="voltage,current,power" required size="40"><br><br>
+                        <input type="submit" value="Queue Configuration">
+                    </form>
+                </div>
+                <div class="card">
+                    <h3>Queue Inverter Command</h3>
+                    <form action="/queue-command" method="POST">
+                        <label for="cmd_device_id">Device ID:</label><br>
+                        <input type="text" id="cmd_device_id" name="device_id" required><br><br>
+                        <label for="target_register">Target Register:</label><br>
+                        <select id="target_register" name="target_register">
+                            <option value="export_power_percent">export_power_percent</option>
+                        </select><br><br>
+                        <label for="value">Value (0-100):</label><br>
+                        <input type="number" id="value" name="value" min="0" max="100" required><br><br>
+                        <input type="submit" value="Queue Command">
+                    </form>
+                </div>
+            </div>
+            <div class="cards">
                 <div class="card"><div class="status">Backend Running</div><div class="muted">Auto-refresh every 2s</div></div>
                 <div class="card"><div><strong>Total Reports Received</strong></div><div id="totalReports">0</div></div>
                 <div class="card"><div><strong>Last Update</strong></div><div id="lastUpdate">Never</div></div>
@@ -194,6 +290,22 @@ def index():
             <div class="table-container">
                 <h3>Latest Device Compression Reports</h3>
                 <div id="tableContent"><div class="muted">Waiting for device data... Send JSON to POST /upload</div></div>
+            </div>
+            
+            <!-- NEW: Configuration Logs Table -->
+            <div class="table-container">
+                <h3>Configuration Acknowledgment Logs</h3>
+                <div id="configLogsContent">
+                    {config_logs_html}
+                </div>
+            </div>
+            
+            <!-- NEW: Command Result Logs Table -->
+            <div class="table-container">
+                <h3>Command Execution Logs</h3>
+                <div id="commandLogsContent">
+                    {command_logs_html}
+                </div>
             </div>
         </div>
 
@@ -297,7 +409,49 @@ def index():
     </body>
     </html>
     """
-    return html
+    return html.format(config_logs_html=config_logs_html, command_logs_html=command_logs_html)
+
+
+@app.route("/set-config", methods=["POST"])
+def set_config_from_form():
+    form_data = request.form
+    device_id = form_data.get("device_id")
+    sampling_interval = form_data.get("sampling_interval", type=int)
+    registers_str = form_data.get("registers", "")
+
+    if not device_id or not sampling_interval:
+        return "Error: Missing device_id or sampling_interval", 400
+
+    # Convert comma-separated string to a list of strings
+    registers = [reg.strip() for reg in registers_str.split(',') if reg.strip()]
+
+    config = {
+        "sampling_interval": sampling_interval,
+        "registers": registers
+    }
+    PENDING_CONFIGS[device_id] = config
+
+    return f"Configuration for {device_id} has been queued. It will be sent on the device's next check-in."
+
+
+@app.route("/queue-command", methods=["POST"])
+def queue_command_from_form():
+    form_data = request.form
+    device_id = form_data.get("device_id")
+    target_register = form_data.get("target_register")
+    value = form_data.get("value", type=int)
+
+    if not device_id or not target_register or value is None:
+        return "Error: Missing device_id, target_register, or value", 400
+
+    command = {
+        "action": "write_register",
+        "target_register": target_register,
+        "value": value
+    }
+    PENDING_COMMANDS[device_id] = command
+
+    return f"Command for {device_id} has been queued. It will be sent on the device's next check-in."
 
 
 @app.route("/upload", methods=["POST"])
@@ -308,6 +462,16 @@ def upload_data():
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
         processed_payload = dict(payload)
+        
+        # NEW: Check for and log command execution results
+        if "command_result" in payload:
+            command_log_entry = {
+                "device_id": payload.get("device_id"),
+                "result_data": payload["command_result"],
+                "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+            }
+            COMMAND_LOGS.append(command_log_entry)
+        
         # Decompress each field into decompressed_payload and original_values
         if "fields" in payload:
             for field_name, field_data in payload["fields"].items():
@@ -542,9 +706,37 @@ def benchmarks_page():
 
 
 @app.route("/config", methods=["POST"])
-def set_config():
-    config = request.json
-    return jsonify({"status": "config_received", "applied_config": config})
+def handle_config():
+    data = request.json
+    device_id = data.get("device_id")
+
+    if not device_id:
+        return jsonify({"status": "error", "message": "device_id is required"}), 400
+
+    # Scenario 1: Device is sending an acknowledgment
+    if "config_ack" in data:
+        ack_log_entry = {
+            "device_id": device_id,
+            "ack_data": data["config_ack"],
+            "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+        }
+        CONFIG_LOGS.append(ack_log_entry)
+        return jsonify({"status": "ack_received"})
+
+    # Scenario 2: Device is checking for a new config or command
+    elif data.get("status") == "ready":
+        response = {}
+        # Check for pending configuration
+        if device_id in PENDING_CONFIGS:
+            response["config_update"] = PENDING_CONFIGS.pop(device_id) # pop to send only once
+
+        # Check for pending command (for Part 2)
+        if device_id in PENDING_COMMANDS:
+            response["command"] = PENDING_COMMANDS.pop(device_id) # pop to send only once
+
+        return jsonify(response)
+
+    return jsonify({"status": "unknown_request"}), 400
 
 
 if __name__ == "__main__":
