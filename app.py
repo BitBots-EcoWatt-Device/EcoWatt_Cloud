@@ -1,13 +1,20 @@
 from flask import Flask, request, jsonify
 from datetime import datetime, timezone, timedelta
 import os
-import json
-from collections import defaultdict
 
-# Sri Lanka timezone (GMT+5:30)
+app = Flask(__name__)
+
+# Timezone
 SRI_LANKA_TZ = timezone(timedelta(hours=5, minutes=30))
 
-# Delta decompression function
+# In-memory storage
+DATA_STORAGE = []
+COMPRESSION_REPORTS = []
+ACCUMULATED_SERIES = {}  # { field_name: {labels: [...], values: [...]} }
+
+
+# ---------- Utility Functions ----------
+
 def delta_decode(deltas):
     if not deltas:
         return []
@@ -16,535 +23,245 @@ def delta_decode(deltas):
         decoded.append(decoded[-1] + deltas[i])
     return decoded
 
+
 def scale_back_float(scaled_int, scale):
     return scaled_int / (10.0 ** scale)
 
-app = Flask(__name__)
 
-# In-memory database substitute
-DATA_STORAGE = []         # Full raw records with device_data
-COMPRESSION_REPORTS = []  # Processed payloads (possibly chunked)
-
-
-def _group_uploads_by_session():
-    """
-    Group possibly chunked uploads by (session_id, window_start_ms, window_end_ms).
-    Falls back to unique keys if session metadata is missing.
-    Returns a list of combined upload dicts with merged fields.
-    """
-    groups = {}
-    order = []
-    for payload in COMPRESSION_REPORTS:
-        # Determine grouping key
-        sid = payload.get("session_id")
-        wstart = payload.get("window_start_ms")
-        wend = payload.get("window_end_ms")
-        if sid is not None:
-            key = (sid, wstart, wend)
-        else:
-            # Fallback: device_id + timestamp
-            key = (payload.get("device_id"), payload.get("timestamp"))
-
-        if key not in groups:
-            groups[key] = {
-                "device_id": payload.get("device_id"),
-                "timestamp": payload.get("timestamp"),
-                "received_at": None,
-                "session_id": sid,
-                "window_start_ms": wstart,
-                "window_end_ms": wend,
-                "poll_count": payload.get("poll_count"),
-                "fields": {},
-            }
-            order.append(key)
-
-        # Merge fields from chunks
-        fields = payload.get("fields", {})
-        groups[key]["fields"].update(fields)
-
-    return [groups[k] for k in order]
+def extract_device_data(payload):
+    if not payload:
+        return None
+    if "device_data" in payload and isinstance(payload["device_data"], dict):
+        return payload["device_data"]
+    return payload
 
 
-def _compute_upload_benchmark(upload):
-    """
-    Compute per-upload benchmark metrics:
-      - compression_method (from first field if present)
-      - number_of_samples (from poll_count or inferred)
-      - original_payload_size_bytes (sum of decompressed ints * 4)
-      - compressed_payload_size_bytes (sum of field.bytes_len)
-      - compression_ratio (orig / compressed)
-      - cpu_time_ms_total (sum)
-      - verify_ok (all fields True or decompression present)
-    """
-    fields = upload.get("fields", {})
-    method = None
-    # Prefer device-provided totals if available (single-chunk or window totals)
-    total_orig = int(upload.get("original_payload_size_bytes_total") or 0)
-    total_comp = int(upload.get("compressed_payload_size_bytes_total") or 0)
-    total_cpu = float(upload.get("cpu_time_ms_total") or upload.get("cpu_time_ms_total_window") or 0.0)
-    all_ok = bool(upload.get("verify_ok_all") or upload.get("verify_ok_all_window") or True)
-    inferred_samples = 0
-
-    for name, f in fields.items():
-        if method is None:
-            method = f.get("method", "Delta")
-        n = int(f.get("n_samples", 0))
-        if n > inferred_samples:
-            inferred_samples = n
-
-        # If device totals are missing, compute per-field and sum
-        if total_comp == 0:
-            comp = int(f.get("bytes_len", 0))
-            if comp <= 0:
-                comp = 4 * len(f.get("payload", []))
-            total_comp += comp
-
-        if total_orig == 0:
-            f_orig = int(f.get("original_bytes") or 0)
-            if f_orig == 0:
-                decomp = f.get("decompressed_payload")
-                if decomp is None:
-                    try:
-                        decomp = delta_decode(f.get("payload", []))
-                    except Exception:
-                        decomp = []
-                f_orig = 4 * len(decomp)
-            total_orig += f_orig
-
-        # CPU time accumulation if total not provided
-        if upload.get("cpu_time_ms_total") is None and upload.get("cpu_time_ms_total_window") is None:
-            total_cpu += float(f.get("cpu_time_ms", 0.0))
-
-        # verify accumulation if not provided
-        if upload.get("verify_ok_all") is None and upload.get("verify_ok_all_window") is None:
-            vflag = f.get("verify_ok")
-            if vflag is None:
-                decomp = f.get("decompressed_payload")
-                if decomp is None:
-                    try:
-                        decomp = delta_decode(f.get("payload", []))
-                    except Exception:
-                        decomp = []
-                vflag = len(decomp) == n if n else len(decomp) > 0
-            all_ok = all_ok and bool(vflag)
-
-    poll_count = int(upload.get("poll_count") or inferred_samples)
-    ratio = (float(total_orig) / float(total_comp)) if total_comp > 0 else None
-
-    return {
-        "received_at": upload.get("received_at"),
-        "device_id": upload.get("device_id", "Unknown"),
-        "session_id": upload.get("session_id"),
-        "window_start_ms": upload.get("window_start_ms"),
-        "window_end_ms": upload.get("window_end_ms"),
-        "compression_method": method or "Delta",
-        "number_of_samples": poll_count,
-        "original_payload_size_bytes": total_orig,
-        "compressed_payload_size_bytes": total_comp,
-        "compression_ratio": ratio,
-        "cpu_time_ms_total": total_cpu,
-        "verify_ok": all_ok,
-    }
-
+# ---------- Routes ----------
 
 @app.route("/")
 def index():
-    html = """
+    return """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>EcoWatt Cloud - Device Data Monitor</title>
+        <title>EcoWatt Dashboard</title>
+        <meta charset="utf-8">
         <style>
-            :root { --brand:#2c3e50; --accent:#3498db; --ok:#27ae60; --panel:#ffffff; --muted:#7f8c8d; }
-            body { font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }
-            .header { background-color: var(--brand); color: white; padding: 24px; display:flex; align-items:center; justify-content:space-between; }
-            .header h1 { margin:0; font-size: 22px; }
-            .btn { background: var(--accent); color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }
-            .container { padding: 20px; }
-            .status { color: var(--ok); font-weight: bold; font-size: 14px; }
-            .cards { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin: 20px 0; }
-            .card { background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }
-            .table-container { background:var(--panel); padding: 16px; border-radius: 12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }
-            table { width:100%; border-collapse: collapse; }
-            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
-            th { background-color: #eef6ff; color: #333; }
-            .device-id { font-weight: bold; color: #e74c3c; }
-            .fields-container { display: flex; flex-wrap: wrap; gap: 10px; }
-            .field-card { border: 1px solid #eee; border-radius: 8px; padding: 12px; background-color: #fafafa; }
-            .field-card h4 { color: var(--accent); margin: 0 0 6px 0; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-            .field-details div { margin: 4px 0; font-size: 13px; color:#444; }
-            .payload-section { background-color: #f0f7fb; padding: 8px; border-radius: 5px; margin-top: 8px; border-left: 4px solid var(--accent); font-size:12px; }
-            .original-values { background-color: #e8f5e8; padding: 6px; border-radius: 3px; margin-top: 5px; border-left: 3px solid #28a745; font-weight: bold; font-size:12px; }
-            .muted { color: var(--muted); font-size:12px; }
+            body {font-family: 'Segoe UI', Arial; margin:0; background:#f6f8fa;}
+            .header {background:#1f2937; color:white; padding:16px 24px; display:flex; justify-content:space-between; align-items:center;}
+            .header h1 {margin:0; font-size:20px;}
+            .btn {background:#2563eb; color:#fff; padding:8px 14px; border-radius:8px; text-decoration:none; font-weight:600;}
+            .container {padding:20px; max-width:1200px; margin:auto;}
+            .card {background:white; border-radius:10px; box-shadow:0 4px 8px rgba(0,0,0,0.05); padding:16px; margin-bottom:16px;}
+            table {width:100%; border-collapse:collapse; margin-top:10px;}
+            th, td {padding:10px; border-bottom:1px solid #eee; text-align:left; vertical-align:top;}
+            th {background:#f0f6ff;}
+            .field-summary {font-family: monospace; font-size:13px; line-height:1.4; color:#111;}
+            .muted {color:#888;}
+            .device-id {font-weight:bold; color:#e11d48;}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>🔋 EcoWatt Cloud - Device Data Monitor</h1>
+            <h1>🔋 EcoWatt Device Dashboard</h1>
             <div>
-                <a class="btn" href="/benchmarks">View Benchmarks</a>
+                <a class="btn" href="/display">Display</a>
+                <a class="btn" href="/config">Configure</a>
             </div>
         </div>
+
         <div class="container">
-            <div class="cards">
-                <div class="card"><div class="status">Backend Running</div><div class="muted">Auto-refresh every 2s</div></div>
-                <div class="card"><div><strong>Total Reports Received</strong></div><div id="totalReports">0</div></div>
-                <div class="card"><div><strong>Last Update</strong></div><div id="lastUpdate">Never</div></div>
-            </div>
-            <div class="table-container">
-                <h3>Latest Device Compression Reports</h3>
-                <div id="tableContent"><div class="muted">Waiting for device data... Send JSON to POST /upload</div></div>
+            <div class="card">
+                <h2 style="margin-top:0;">Device Reports</h2>
+                <p class="muted">Auto-refreshes every 2 seconds</p>
+                <div id="tableContent" class="muted">Waiting for data...</div>
             </div>
         </div>
 
         <script>
-            function formatTimestamp(isoString) { 
-                try { 
-                    if (!isoString) return '—';
-                    // Parse the ISO string and format for Sri Lanka timezone
-                    const date = new Date(isoString);
-                    return date.toLocaleString('en-US', {
-                        timeZone: 'Asia/Colombo',
-                        year: 'numeric',
-                        month: '2-digit',
-                        day: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit',
-                        hour12: false
-                    });
-                } catch(e) { 
-                    return '—'; 
-                } 
-            }
-            function createFieldsDisplay(fields) {
-                let html = '<div class="fields-container">';
-                for (const [fieldName, fieldData] of Object.entries(fields || {})) {
-                    html += `
-                        <div class="field-card">
-                            <h4>${fieldName}</h4>
-                            <div class="field-details">
-                                <div><strong>Samples:</strong> ${fieldData.n_samples ?? '—'}</div>
-                                <div><strong>Method:</strong> ${fieldData.method ?? '—'}</div>
-                    `;
-                    if (fieldData.payload) {
-                        html += `
-                                <div class="payload-section">
-                                    <div><strong>Compressed Payload:</strong> [${fieldData.payload.join(', ')}]</div>
-                        `;
-                        if (fieldData.decompressed_payload) {
-                            html += `<div><strong>Decompressed:</strong> [${fieldData.decompressed_payload.join(', ')}]</div>`;
-                        }
-                        if (fieldData.original_values) {
-                            html += `<div class="original-values"><strong>Original:</strong> [${fieldData.original_values.map(v => v.toFixed(3)).join(', ')}]</div>`;
-                        }
-                        html += `</div>`;
-                    }
-                    html += `</div></div>`;
-                }
-                html += '</div>';
-                return html;
+            function formatValues(arr){
+                return arr.map(v => Number(v).toFixed(3)).join(', ');
             }
 
-            function updateTable(data) {
-                const tableContent = document.getElementById('tableContent');
-                const totalReports = document.getElementById('totalReports');
-                const lastUpdate = document.getElementById('lastUpdate');
-                if (data.data && data.data.length > 0) {
-                    let tableHTML = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Device ID</th>
-                                    <th>Device Timestamp</th>
-                                    <th>Fields Summary</th>
-                                    <th>Server Received At</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                    `;
-                    data.data.slice().reverse().forEach(report => {
-                        const fieldsCount = Object.keys(report.fields || {}).length;
-                        tableHTML += `
-                            <tr>
-                                <td class="device-id">${report.device_id || 'Unknown'}</td>
-                                <td class="timestamp">${report.timestamp || 'N/A'}</td>
-                                <td>
-                                    <strong>${fieldsCount} fields</strong><br>
-                                    ${createFieldsDisplay(report.fields || {})}
-                                </td>
-                                <td class="timestamp">${formatTimestamp(report.received_at)}</td>
-                            </tr>
-                        `;
-                    });
-                    tableHTML += '</tbody></table>';
-                    tableContent.innerHTML = tableHTML;
-                } else {
-                    tableContent.innerHTML = '<div class="muted">No device data received yet. Waiting for JSON data...</div>';
+            function renderTable(data){
+                if(!data.data || data.data.length===0){
+                    document.getElementById('tableContent').innerHTML = '<div class="muted">No data yet</div>';
+                    return;
                 }
-                totalReports.textContent = data.total_reports || 0;
-                const latestTime = data.data && data.data.length > 0 ? data.data[data.data.length - 1].received_at : null;
-                lastUpdate.textContent = formatTimestamp(latestTime);
+                let html = '<table><thead><tr><th>Device ID</th><th>Device Timestamp</th><th>#Fields</th><th>Samples/Field</th><th>Field Summary</th><th>Received At</th></tr></thead><tbody>';
+                data.data.slice().reverse().forEach(row=>{
+                    const flds = row.fields || {};
+                    const names = Object.keys(flds);
+                    let summary='';
+                    names.forEach(fn=>{
+                        const orig = flds[fn]?.original_values || [];
+                        summary += `<div><b>${fn}</b>: ${formatValues(orig)}</div>`;
+                    });
+                    html += `<tr>
+                        <td class="device-id">${row.device_id||'-'}</td>
+                        <td>${row.timestamp||'-'}</td>
+                        <td>${names.length}</td>
+                        <td>${flds[names[0]]?.n_samples||'-'}</td>
+                        <td class="field-summary">${summary}</td>
+                        <td>${row.received_at||'-'}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+                document.getElementById('tableContent').innerHTML = html;
             }
 
-            function fetchLatestData() {
-                fetch('/api/latest_data')
-                    .then(r => r.json()).then(updateTable).catch(console.error);
+            async function load(){
+                try{
+                    const res = await fetch('/api/latest_data');
+                    const data = await res.json();
+                    renderTable(data);
+                }catch(e){console.error(e);}
             }
-            fetchLatestData();
-            setInterval(fetchLatestData, 2000);
+            load();
+            setInterval(load,2000);
         </script>
     </body>
     </html>
     """
-    return html
 
 
-@app.route("/upload", methods=["POST"])
-def upload_data():
-    try:
-        payload = request.json
-        if not payload:
-            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
-
-        processed_payload = dict(payload)
-        # Decompress each field into decompressed_payload and original_values
-        if "fields" in payload:
-            for field_name, field_data in payload["fields"].items():
-                if "payload" in field_data and field_data["payload"]:
-                    compressed_payload = field_data["payload"]
-                    decompressed_values = delta_decode(compressed_payload)
-                    scale = 3 if field_name in ["AC_VOLTAGE", "AC_CURRENT", "AC_FREQUENCY"] else 0
-                    original_values = [scale_back_float(val, scale) for val in decompressed_values]
-                    processed_payload.setdefault("fields", {}).setdefault(field_name, {})
-                    processed_payload["fields"][field_name]["decompressed_payload"] = decompressed_values
-                    processed_payload["fields"][field_name]["original_values"] = original_values
-
-        # Get current time in Sri Lanka timezone
-        sri_lanka_time = datetime.now(SRI_LANKA_TZ)
-        record = {
-            "received_at": sri_lanka_time.isoformat(),
-            "device_data": processed_payload
-        }
-        DATA_STORAGE.append(record)
-
-        if "fields" in processed_payload:
-            # Save a flattened copy (without wrapping) for easy grouping
-            flat = dict(processed_payload)
-            # keep received time for grouping output if desired
-            flat["received_at"] = record["received_at"]
-            COMPRESSION_REPORTS.append(flat)
-
-        return jsonify({
-            "status": "ok",
-            "ack_time": record["received_at"],
-            "server_time_zone": "Asia/Colombo (GMT+5:30)",
-            "next_config": {
-                "upload_interval": 15,  # minutes (advisory for demo)
-                "sampling_rate": 5,     # seconds
-            },
-            "decompression_status": "success" if "fields" in payload else "no_compression_data"
-        })
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.route("/data", methods=["GET"])
-def get_data():
-    return jsonify(DATA_STORAGE)
-
-
-@app.route("/api/latest_data", methods=["GET"])
-def get_latest_data():
-    if COMPRESSION_REPORTS:
-        latest_reports = COMPRESSION_REPORTS[-10:]
-        return jsonify({
-            "status": "success",
-            "data": latest_reports,
-            "total_reports": len(COMPRESSION_REPORTS)
-        })
-    else:
-        return jsonify({
-            "status": "no_data",
-            "data": [],
-            "total_reports": 0
-        })
-
-
-@app.route("/compression_report", methods=["GET"])
-def get_compression_reports():
-    return jsonify(COMPRESSION_REPORTS)
-
-
-@app.route("/compression_display")
-def compression_display():
-    # Fallback to sample if no data
-    if COMPRESSION_REPORTS:
-        display_data = COMPRESSION_REPORTS[-1]
-        data_source = "Latest Device Data"
-    else:
-        display_data = {
-            "device_id": "002",
-            "timestamp": 27379,
-            "fields": {
-                "AC_VOLTAGE": {"method": "Delta", "param_id": 0, "n_samples": 1, "bytes_len": 1, "cpu_time_ms": 0.000338, "payload": [230800], "decompressed_payload": [230800], "original_values": [230.8]},
-                "AC_CURRENT": {"method": "Delta", "param_id": 1, "n_samples": 1, "bytes_len": 1, "cpu_time_ms": 0.000160, "payload": [0], "decompressed_payload": [0], "original_values": [0.0]},
-                "AC_FREQUENCY": {"method": "Delta", "param_id": 2, "n_samples": 1, "bytes_len": 1, "cpu_time_ms": 0.000128, "payload": [50070], "decompressed_payload": [50070], "original_values": [50.07]}
-            }
-        }
-        data_source = "Sample Data (No device data received yet)"
-    json_str = json.dumps(display_data, indent=2)
-    html = f"""
+@app.route("/display")
+def display():
+    return """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>EcoWatt Compression Report</title>
+        <title>EcoWatt Live Display</title>
+        <meta charset="utf-8">
         <style>
-            body {{ font-family: Arial, sans-serif; margin: 40px; }}
-            .json-display {{ background-color: #f4f4f4; padding: 20px; border-radius: 5px; white-space: pre-wrap; font-family: monospace; border: 1px solid #ddd; font-size: 14px; }}
-            h1 {{ color: #333; }} .timestamp {{ color: #666; font-size: 0.9em; }} .data-source {{ color: #007bff; font-weight: bold; margin-bottom: 15px; }}
-            .refresh-note {{ background-color: #e7f3ff; padding: 10px; border-radius: 5px; margin: 15px 0; }}
+            body {font-family:'Segoe UI', Arial; background:#f9fafb; margin:0;}
+            .header {background:#1f2937; color:white; padding:12px 20px; display:flex; justify-content:space-between; align-items:center;}
+            .btn {background:#2563eb; color:white; padding:6px 10px; border-radius:6px; text-decoration:none;}
+            .container {padding:20px; max-width:1200px; margin:auto;}
+            .chart-card {background:white; border-radius:10px; box-shadow:0 4px 8px rgba(0,0,0,0.05); padding:16px; margin-bottom:16px;}
+            canvas {width:100%!important; height:300px!important;}
         </style>
-        <script> setTimeout(function(){{ window.location.reload(); }}, 5000); </script>
-    </head>
-    <body>
-        <h1>EcoWatt Cloud - Compression Report Display</h1>
-        <p class="timestamp">Page generated at: {datetime.now(SRI_LANKA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (Sri Lanka Time, GMT+5:30)</p>
-        <p class="data-source">{data_source}</p>
-        <div class="refresh-note">This page auto-refreshes every 5 seconds to show new device data. Total reports received: {len(COMPRESSION_REPORTS)}</div>
-        <div class="json-display">{json_str}</div>
-        <br>
-        <p><a href="/">← Back to Home</a></p>
-    </body>
-    </html>
-    """
-    return html
-
-
-@app.route("/benchmarks")
-def benchmarks_page():
-    # Build combined uploads and compute metrics
-    combined = _group_uploads_by_session()
-    # inject received_at by matching in DATA_STORAGE (best-effort)
-    ra_by_signature = {}
-    for rec in DATA_STORAGE:
-        dd = rec.get("device_data", {})
-        key = (dd.get("session_id"), dd.get("window_start_ms"), dd.get("window_end_ms"))
-        ra_by_signature[key] = rec.get("received_at")
-    rows = []
-    for u in combined:
-        sig = (u.get("session_id"), u.get("window_start_ms"), u.get("window_end_ms"))
-        u["received_at"] = ra_by_signature.get(sig)
-        rows.append(_compute_upload_benchmark(u))
-
-    # Compute overall stats
-    total_uploads = len(rows)
-    avg_ratio = (sum([r["compression_ratio"] for r in rows if r["compression_ratio"]]) / max(1, len([r for r in rows if r["compression_ratio"]]))) if rows else 0
-    avg_orig = (sum([r["original_payload_size_bytes"] for r in rows]) / total_uploads) if total_uploads else 0
-    avg_comp = (sum([r["compressed_payload_size_bytes"] for r in rows]) / total_uploads) if total_uploads else 0
-    avg_cpu = (sum([r["cpu_time_ms_total"] for r in rows]) / total_uploads) if total_uploads else 0
-
-    # Helper function for formatting timestamps in benchmarks
-    def formatTimestamp(iso_string):
-        if not iso_string:
-            return '—'
-        try:
-            # Parse the ISO string and convert to Sri Lanka time if needed
-            dt = datetime.fromisoformat(iso_string.replace('Z', '+00:00'))
-            # If it's already in Sri Lanka timezone, use as is, otherwise convert
-            if dt.tzinfo is None:
-                # Assume it's already Sri Lanka time if no timezone info
-                return dt.strftime('%Y-%m-%d %H:%M:%S')
-            elif dt.tzinfo.utcoffset(dt) == timedelta(hours=5, minutes=30):
-                # Already in Sri Lanka time
-                return dt.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                # Convert to Sri Lanka time
-                sri_lanka_time = dt.astimezone(SRI_LANKA_TZ)
-                return sri_lanka_time.strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            return iso_string
-
-    # Build HTML
-    html_rows = "".join([
-        f"""
-        <tr>
-            <td>{formatTimestamp(r.get('received_at'))}</td>
-            <td>{r['device_id']}</td>
-            <td>{r.get('session_id') or '—'}</td>
-            <td>{r['number_of_samples']}</td>
-            <td>{r['original_payload_size_bytes']}</td>
-            <td>{r['compressed_payload_size_bytes']}</td>
-            <td>{f"{r['compression_ratio']:.2f}" if r['compression_ratio'] else '—'}</td>
-            <td>{f"{r['cpu_time_ms_total']:.3f}"}</td>
-            <td>{'✅' if r['verify_ok'] else '❌'}</td>
-            <td>{r['compression_method']}</td>
-        </tr>
-        """ for r in rows
-    ])
-
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>EcoWatt Benchmarks</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }}
-            .header {{ background:#2c3e50; color:#fff; padding:20px; display:flex; justify-content:space-between; align-items:center; }}
-            .btn {{ background:#3498db; color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }}
-            .container {{ padding:20px; }}
-            .cards {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:20px; }}
-            .card {{ background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }}
-            table {{ width:100%; border-collapse: collapse; background:#fff; box-shadow:0 6px 16px rgba(0,0,0,0.06); border-radius:12px; overflow:hidden; }}
-            th, td {{ padding: 10px 12px; border-bottom: 1px solid #eee; text-align:left; }}
-            th {{ background:#eef6ff; }}
-        </style>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
     <body>
         <div class="header">
-            <h2>EcoWatt Compression Benchmarks</h2>
-            <a class="btn" href="/">← Back to Home</a>
-        </div>
-        <div class="container">
-            <div class="cards">
-                <div class="card"><div><strong>Total Uploads</strong></div><div>{total_uploads}</div></div>
-                <div class="card"><div><strong>Avg Compression Ratio</strong></div><div>{(f"{avg_ratio:.2f}" if avg_ratio else '—')}</div></div>
-                <div class="card"><div><strong>Avg Original Size (B)</strong></div><div>{int(avg_orig)}</div></div>
-                <div class="card"><div><strong>Avg Compressed Size (B)</strong></div><div>{int(avg_comp)}</div></div>
-                <div class="card"><div><strong>Avg CPU Time (ms)</strong></div><div>{avg_cpu:.3f}</div></div>
+            <h2>📊 EcoWatt Live Charts</h2>
+            <div>
+                <a class="btn" href="/">Dashboard</a>
+                <a class="btn" href="/config">Configure</a>
             </div>
-
-            <table>
-                <thead>
-                    <tr>
-                        <th>Server Received At</th>
-                        <th>Device</th>
-                        <th>Session</th>
-                        <th>Samples</th>
-                        <th>Original Bytes</th>
-                        <th>Compressed Bytes</th>
-                        <th>Ratio</th>
-                        <th>CPU ms (Total)</th>
-                        <th>Lossless</th>
-                        <th>Method</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {html_rows if html_rows else '<tr><td colspan="10">No uploads yet</td></tr>'}
-                </tbody>
-            </table>
         </div>
+
+        <div class="container" id="charts"></div>
+
+        <script>
+            const charts = {};
+
+            function createChart(name){
+                const div = document.createElement('div');
+                div.className = 'chart-card';
+                div.innerHTML = `<h3>${name}</h3><canvas id="chart_${name}"></canvas>`;
+                document.getElementById('charts').appendChild(div);
+
+                const ctx = div.querySelector('canvas').getContext('2d');
+                const chart = new Chart(ctx,{
+                    type:'line',
+                    data:{labels:[], datasets:[{label:name,data:[],borderColor:'#2563eb',tension:0.3,fill:false,pointRadius:0}]},
+                    options:{responsive:true,maintainAspectRatio:false,scales:{x:{display:false}}}
+                });
+                charts[name]=chart;
+            }
+
+            async function updateCharts(){
+                try{
+                    const r = await fetch('/api/fields_series');
+                    const j = await r.json();
+                    const series = j.fields_series||{};
+                    for(const [fname,vals] of Object.entries(series)){
+                        if(!charts[fname]) createChart(fname);
+                        const chart = charts[fname];
+                        chart.data.labels = vals.labels;
+                        chart.data.datasets[0].data = vals.values;
+                        chart.update();
+                    }
+                }catch(e){console.error(e);}
+            }
+            updateCharts();
+            setInterval(updateCharts,2000);
+        </script>
     </body>
     </html>
     """
-    return html
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    try:
+        payload = request.json
+        device_data = extract_device_data(payload)
+        if not device_data:
+            return jsonify({"error": "No device_data found"}), 400
+
+        sri_time = datetime.now(SRI_LANKA_TZ).isoformat()
+
+        # Parse fields
+        fields = device_data.get("fields", {})
+        for name, fdata in fields.items():
+            if not isinstance(fdata, dict):
+                continue
+
+            # Delta decode + scale
+            payload_vals = fdata.get("payload", [])
+            dec = delta_decode(payload_vals) if payload_vals else []
+            scale = 3 if name in ["AC_VOLTAGE", "AC_CURRENT", "AC_FREQUENCY"] else 0
+            orig_vals = [scale_back_float(v, scale) for v in dec] if dec else fdata.get("original_values", [])
+
+            fdata["original_values"] = orig_vals
+            fdata["n_samples"] = fdata.get("n_samples", len(orig_vals))
+
+            # accumulate for display
+            if name not in ACCUMULATED_SERIES:
+                ACCUMULATED_SERIES[name] = {"labels": [], "values": []}
+            for v in orig_vals:
+                ACCUMULATED_SERIES[name]["labels"].append(sri_time)
+                ACCUMULATED_SERIES[name]["values"].append(v)
+
+        # Save data
+        flat = dict(device_data)
+        flat["received_at"] = sri_time
+        COMPRESSION_REPORTS.append(flat)
+        DATA_STORAGE.append({"device_data": device_data, "received_at": sri_time})
+
+        return jsonify({"status": "ok", "received_at": sri_time})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/latest_data")
+def api_latest_data():
+    n = 20
+    return jsonify({"data": COMPRESSION_REPORTS[-n:], "total_reports": len(COMPRESSION_REPORTS)})
+
+
+@app.route("/api/fields_series")
+def api_fields_series():
+    return jsonify({"fields_series": ACCUMULATED_SERIES})
+
+
+@app.route("/config")
+def config_page():
+    return """
+    <html><body style='font-family:Arial;padding:40px;'>
+    <h2>Configuration</h2>
+    <p>POST to <code>/config</code> to update device settings.</p>
+    <a href="/">← Back</a>
+    </body></html>
+    """
 
 
 @app.route("/config", methods=["POST"])
-def set_config():
-    config = request.json
-    return jsonify({"status": "config_received", "applied_config": config})
+def config_set():
+    return jsonify({"status": "received", "config": request.json})
 
 
 if __name__ == "__main__":
