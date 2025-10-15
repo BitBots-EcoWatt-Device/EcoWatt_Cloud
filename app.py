@@ -211,7 +211,7 @@ def index():
     else:
         command_logs_html = '<div class="muted">No command execution results received yet.</div>'
 
-    html = """
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -310,12 +310,12 @@ def index():
         </div>
 
         <script>
-            function formatTimestamp(isoString) { 
-                try { 
+            function formatTimestamp(isoString) {{ 
+                try {{ 
                     if (!isoString) return '—';
                     // Parse the ISO string and format for Sri Lanka timezone
                     const date = new Date(isoString);
-                    return date.toLocaleString('en-US', {
+                    return date.toLocaleString('en-US', {{
                         timeZone: 'Asia/Colombo',
                         year: 'numeric',
                         month: '2-digit',
@@ -324,45 +324,45 @@ def index():
                         minute: '2-digit',
                         second: '2-digit',
                         hour12: false
-                    });
-                } catch(e) { 
+                    }});
+                }} catch(e) {{ 
                     return '—'; 
-                } 
-            }
-            function createFieldsDisplay(fields) {
+                }} 
+            }}
+            function createFieldsDisplay(fields) {{
                 let html = '<div class="fields-container">';
-                for (const [fieldName, fieldData] of Object.entries(fields || {})) {
+                for (const [fieldName, fieldData] of Object.entries(fields || {{}})) {{
                     html += `
                         <div class="field-card">
-                            <h4>${fieldName}</h4>
+                            <h4>${{fieldName}}</h4>
                             <div class="field-details">
-                                <div><strong>Samples:</strong> ${fieldData.n_samples ?? '—'}</div>
-                                <div><strong>Method:</strong> ${fieldData.method ?? '—'}</div>
+                                <div><strong>Samples:</strong> ${{fieldData.n_samples ?? '—'}}</div>
+                                <div><strong>Method:</strong> ${{fieldData.method ?? '—'}}</div>
                     `;
-                    if (fieldData.payload) {
+                    if (fieldData.payload) {{
                         html += `
                                 <div class="payload-section">
-                                    <div><strong>Compressed Payload:</strong> [${fieldData.payload.join(', ')}]</div>
+                                    <div><strong>Compressed Payload:</strong> [${{fieldData.payload.join(', ')}}]</div>
                         `;
-                        if (fieldData.decompressed_payload) {
-                            html += `<div><strong>Decompressed:</strong> [${fieldData.decompressed_payload.join(', ')}]</div>`;
-                        }
-                        if (fieldData.original_values) {
-                            html += `<div class="original-values"><strong>Original:</strong> [${fieldData.original_values.map(v => v.toFixed(3)).join(', ')}]</div>`;
-                        }
+                        if (fieldData.decompressed_payload) {{
+                            html += `<div><strong>Decompressed:</strong> [${{fieldData.decompressed_payload.join(', ')}}]</div>`;
+                        }}
+                        if (fieldData.original_values) {{
+                            html += `<div class="original-values"><strong>Original:</strong> [${{fieldData.original_values.map(v => v.toFixed(3)).join(', ')}}]</div>`;
+                        }}
                         html += `</div>`;
-                    }
+                    }}
                     html += `</div></div>`;
-                }
+                }}
                 html += '</div>';
                 return html;
-            }
+            }}
 
-            function updateTable(data) {
+            function updateTable(data) {{
                 const tableContent = document.getElementById('tableContent');
                 const totalReports = document.getElementById('totalReports');
                 const lastUpdate = document.getElementById('lastUpdate');
-                if (data.data && data.data.length > 0) {
+                if (data.data && data.data.length > 0) {{
                     let tableHTML = `
                         <table>
                             <thead>
@@ -375,41 +375,41 @@ def index():
                             </thead>
                             <tbody>
                     `;
-                    data.data.slice().reverse().forEach(report => {
-                        const fieldsCount = Object.keys(report.fields || {}).length;
+                    data.data.slice().reverse().forEach(report => {{
+                        const fieldsCount = Object.keys(report.fields || {{}}).length;
                         tableHTML += `
                             <tr>
-                                <td class="device-id">${report.device_id || 'Unknown'}</td>
-                                <td class="timestamp">${report.timestamp || 'N/A'}</td>
+                                <td class="device-id">${{report.device_id || 'Unknown'}}</td>
+                                <td class="timestamp">${{report.timestamp || 'N/A'}}</td>
                                 <td>
-                                    <strong>${fieldsCount} fields</strong><br>
-                                    ${createFieldsDisplay(report.fields || {})}
+                                    <strong>${{fieldsCount}} fields</strong><br>
+                                    ${{createFieldsDisplay(report.fields || {{}})}}
                                 </td>
-                                <td class="timestamp">${formatTimestamp(report.received_at)}</td>
+                                <td class="timestamp">${{formatTimestamp(report.received_at)}}</td>
                             </tr>
                         `;
-                    });
+                    }});
                     tableHTML += '</tbody></table>';
                     tableContent.innerHTML = tableHTML;
-                } else {
+                }} else {{
                     tableContent.innerHTML = '<div class="muted">No device data received yet. Waiting for JSON data...</div>';
-                }
+                }}
                 totalReports.textContent = data.total_reports || 0;
                 const latestTime = data.data && data.data.length > 0 ? data.data[data.data.length - 1].received_at : null;
                 lastUpdate.textContent = formatTimestamp(latestTime);
-            }
+            }}
 
-            function fetchLatestData() {
+            function fetchLatestData() {{
                 fetch('/api/latest_data')
                     .then(r => r.json()).then(updateTable).catch(console.error);
-            }
+            }}
             fetchLatestData();
             setInterval(fetchLatestData, 2000);
         </script>
     </body>
     </html>
     """
-    return html.format(config_logs_html=config_logs_html, command_logs_html=command_logs_html)
+    return html
 
 
 @app.route("/set-config", methods=["POST"])
