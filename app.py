@@ -75,142 +75,8 @@ def _group_uploads_by_session():
     return [groups[k] for k in order]
 
 
-def _compute_upload_benchmark(upload):
-    """
-    Compute per-upload benchmark metrics:
-      - compression_method (from first field if present)
-      - number_of_samples (from poll_count or inferred)
-      - original_payload_size_bytes (sum of decompressed ints * 4)
-      - compressed_payload_size_bytes (sum of field.bytes_len)
-      - compression_ratio (orig / compressed)
-      - cpu_time_ms_total (sum)
-      - verify_ok (all fields True or decompression present)
-    """
-    fields = upload.get("fields", {})
-    method = None
-    # Prefer device-provided totals if available (single-chunk or window totals)
-    total_orig = int(upload.get("original_payload_size_bytes_total") or 0)
-    total_comp = int(upload.get("compressed_payload_size_bytes_total") or 0)
-    total_cpu = float(upload.get("cpu_time_ms_total") or upload.get("cpu_time_ms_total_window") or 0.0)
-    all_ok = bool(upload.get("verify_ok_all") or upload.get("verify_ok_all_window") or True)
-    inferred_samples = 0
-
-    for name, f in fields.items():
-        if method is None:
-            method = f.get("method", "Delta")
-        n = int(f.get("n_samples", 0))
-        if n > inferred_samples:
-            inferred_samples = n
-
-        # If device totals are missing, compute per-field and sum
-        if total_comp == 0:
-            comp = int(f.get("bytes_len", 0))
-            if comp <= 0:
-                comp = 4 * len(f.get("payload", []))
-            total_comp += comp
-
-        if total_orig == 0:
-            f_orig = int(f.get("original_bytes") or 0)
-            if f_orig == 0:
-                decomp = f.get("decompressed_payload")
-                if decomp is None:
-                    try:
-                        decomp = delta_decode(f.get("payload", []))
-                    except Exception:
-                        decomp = []
-                f_orig = 4 * len(decomp)
-            total_orig += f_orig
-
-        # CPU time accumulation if total not provided
-        if upload.get("cpu_time_ms_total") is None and upload.get("cpu_time_ms_total_window") is None:
-            total_cpu += float(f.get("cpu_time_ms", 0.0))
-
-        # verify accumulation if not provided
-        if upload.get("verify_ok_all") is None and upload.get("verify_ok_all_window") is None:
-            vflag = f.get("verify_ok")
-            if vflag is None:
-                decomp = f.get("decompressed_payload")
-                if decomp is None:
-                    try:
-                        decomp = delta_decode(f.get("payload", []))
-                    except Exception:
-                        decomp = []
-                vflag = len(decomp) == n if n else len(decomp) > 0
-            all_ok = all_ok and bool(vflag)
-
-    poll_count = int(upload.get("poll_count") or inferred_samples)
-    ratio = (float(total_orig) / float(total_comp)) if total_comp > 0 else None
-
-    return {
-        "received_at": upload.get("received_at"),
-        "device_id": upload.get("device_id", "Unknown"),
-        "session_id": upload.get("session_id"),
-        "window_start_ms": upload.get("window_start_ms"),
-        "window_end_ms": upload.get("window_end_ms"),
-        "compression_method": method or "Delta",
-        "number_of_samples": poll_count,
-        "original_payload_size_bytes": total_orig,
-        "compressed_payload_size_bytes": total_comp,
-        "compression_ratio": ratio,
-        "cpu_time_ms_total": total_cpu,
-        "verify_ok": all_ok,
-    }
-
-
 @app.route("/")
 def index():
-    # Format configuration logs
-    config_logs_html = ""
-    if CONFIG_LOGS:
-        config_logs_html = """
-        <table>
-            <thead>
-                <tr>
-                    <th>Device ID</th>
-                    <th>Acknowledgment Data</th>
-                    <th>Received At</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for log in CONFIG_LOGS[-10:]:  # Show last 10 entries
-            config_logs_html += f"""
-                <tr>
-                    <td class="device-id">{log.get('device_id', 'Unknown')}</td>
-                    <td>{json.dumps(log.get('ack_data', {}), indent=2)}</td>
-                    <td>{log.get('received_at', 'N/A')}</td>
-                </tr>
-            """
-        config_logs_html += "</tbody></table>"
-    else:
-        config_logs_html = '<div class="muted">No configuration acknowledgments received yet.</div>'
-    
-    # Format command logs
-    command_logs_html = ""
-    if COMMAND_LOGS:
-        command_logs_html = """
-        <table>
-            <thead>
-                <tr>
-                    <th>Device ID</th>
-                    <th>Command Result</th>
-                    <th>Received At</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for log in COMMAND_LOGS[-10:]:  # Show last 10 entries
-            command_logs_html += f"""
-                <tr>
-                    <td class="device-id">{log.get('device_id', 'Unknown')}</td>
-                    <td>{json.dumps(log.get('result_data', {}), indent=2)}</td>
-                    <td>{log.get('received_at', 'N/A')}</td>
-                </tr>
-            """
-        command_logs_html += "</tbody></table>"
-    else:
-        command_logs_html = '<div class="muted">No command execution results received yet.</div>'
-
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -301,9 +167,6 @@ def index():
     <body>
         <div class="header">
             <h1>🔋 EcoWatt Cloud - Device Data Monitor</h1>
-            <div>
-                <a class="btn" href="/benchmarks">View Benchmarks</a>
-            </div>
         </div>
         <div class="container">
             <div class="cards">
@@ -329,6 +192,14 @@ def index():
                                 <label for="reg_ac_frequency">Frequency</label>
                             </div>
                             <div class="checkbox-item">
+                                <input type="checkbox" id="reg_temperature" name="registers" value="TEMPERATURE" checked>
+                                <label for="reg_temperature">Temperature</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_output_power" name="registers" value="OUTPUT_POWER" checked>
+                                <label for="reg_output_power">Power</label>
+                            </div>
+                            <div class="checkbox-item">
                                 <input type="checkbox" id="reg_pv1_voltage" name="registers" value="PV1_VOLTAGE">
                                 <label for="reg_pv1_voltage">PV1 Voltage</label>
                             </div>
@@ -345,16 +216,8 @@ def index():
                                 <label for="reg_pv2_current">PV2 Current</label>
                             </div>
                             <div class="checkbox-item">
-                                <input type="checkbox" id="reg_temperature" name="registers" value="TEMPERATURE">
-                                <label for="reg_temperature">Temperature</label>
-                            </div>
-                            <div class="checkbox-item">
                                 <input type="checkbox" id="reg_export_power" name="registers" value="EXPORT_POWER_PERCENT">
                                 <label for="reg_export_power">Export Power Percent</label>
-                            </div>
-                            <div class="checkbox-item">
-                                <input type="checkbox" id="reg_output_power" name="registers" value="OUTPUT_POWER">
-                                <label for="reg_output_power">Output Power</label>
                             </div>
                         </div><br>
                         <input type="submit" value="Queue Configuration">
@@ -389,7 +252,7 @@ def index():
             <div class="table-container">
                 <h3>Configuration Acknowledgment Logs</h3>
                 <div id="configLogsContent">
-                    {config_logs_html}
+                    <div class="muted">No configuration acknowledgments received yet.</div>
                 </div>
             </div>
             
@@ -397,7 +260,7 @@ def index():
             <div class="table-container">
                 <h3>Command Execution Logs</h3>
                 <div id="commandLogsContent">
-                    {command_logs_html}
+                    <div class="muted">No command execution results received yet.</div>
                 </div>
             </div>
         </div>
@@ -641,9 +504,102 @@ def index():
                 lastUpdate.textContent = formatTimestamp(latestTime);
             }}
 
+            function updateLogs(logsData) {{
+                const configLogsContent = document.getElementById('configLogsContent');
+                const commandLogsContent = document.getElementById('commandLogsContent');
+                
+                // Update config logs
+                if (logsData.config_logs && logsData.config_logs.length > 0) {{
+                    let configHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Device ID</th>
+                                    <th>Accepted</th>
+                                    <th>Rejected</th>
+                                    <th>Unchanged</th>
+                                    <th>Received At</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    logsData.config_logs.forEach(log => {{
+                        const ackData = log.ack_data || {{}};
+                        const accepted = (ackData.accepted || []).join(', ') || 'None';
+                        const rejected = (ackData.rejected || []).join(', ') || 'None';
+                        const unchanged = (ackData.unchanged || []).join(', ') || 'None';
+                        
+                        configHTML += `
+                            <tr>
+                                <td class="device-id">${{log.device_id || 'Unknown'}}</td>
+                                <td style="color: #27ae60; font-weight: bold;">${{accepted}}</td>
+                                <td style="color: #e74c3c; font-weight: bold;">${{rejected}}</td>
+                                <td style="color: #f39c12; font-weight: bold;">${{unchanged}}</td>
+                                <td>${{formatTimestamp(log.received_at)}}</td>
+                            </tr>
+                        `;
+                    }});
+                    configHTML += '</tbody></table>';
+                    configLogsContent.innerHTML = configHTML;
+                }} else {{
+                    configLogsContent.innerHTML = '<div class="muted">No configuration acknowledgments received yet.</div>';
+                }}
+                
+                // Update command logs
+                if (logsData.command_logs && logsData.command_logs.length > 0) {{
+                    let commandHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Device ID</th>
+                                    <th>Status</th>
+                                    <th>Executed At</th>
+                                    <th>Error Message</th>
+                                    <th>Received At</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    logsData.command_logs.forEach(log => {{
+                        const resultData = log.result_data || {{}};
+                        const status = resultData.status || 'unknown';
+                        const executedAt = resultData.executed_at || 'N/A';
+                        const errorMessage = resultData.error_message || 'None';
+                        
+                        // Color code the status
+                        let statusColor = '#7f8c8d'; // Default gray
+                        let statusText = status;
+                        if (status === 'success') {{
+                            statusColor = '#27ae60'; // Green
+                            statusText = '✅ Success';
+                        }} else if (status === 'failure') {{
+                            statusColor = '#e74c3c'; // Red
+                            statusText = '❌ Failure';
+                        }}
+                        
+                        commandHTML += `
+                            <tr>
+                                <td class="device-id">${{log.device_id || 'Unknown'}}</td>
+                                <td style="color: ${{statusColor}}; font-weight: bold;">${{statusText}}</td>
+                                <td>${{formatTimestamp(executedAt)}}</td>
+                                <td style="color: ${{errorMessage === 'None' ? '#7f8c8d' : '#e74c3c'}}; font-style: ${{errorMessage === 'None' ? 'italic' : 'normal'}};">${{errorMessage}}</td>
+                                <td>${{formatTimestamp(log.received_at)}}</td>
+                            </tr>
+                        `;
+                    }});
+                    commandHTML += '</tbody></table>';
+                    commandLogsContent.innerHTML = commandHTML;
+                }} else {{
+                    commandLogsContent.innerHTML = '<div class="muted">No command execution results received yet.</div>';
+                }}
+            }}
+
             function fetchLatestData() {{
                 fetch('/api/latest_data')
                     .then(r => r.json()).then(updateTable).catch(console.error);
+                    
+                fetch('/api/logs')
+                    .then(r => r.json()).then(updateLogs).catch(console.error);
             }}
             fetchLatestData();
             setInterval(fetchLatestData, 2000);
@@ -769,18 +725,30 @@ def upload_data():
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
         processed_payload = dict(payload)
+        device_id = payload.get("device_id", "Unknown")
         
-        # NEW: Check for and log command execution results
+        # Process configuration acknowledgment if present
+        if "config_ack" in payload:
+            ack_log_entry = {
+                "device_id": device_id,
+                "ack_data": payload["config_ack"],
+                "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+            }
+            CONFIG_LOGS.append(ack_log_entry)
+        
+        # Process command execution result if present
         if "command_result" in payload:
             command_log_entry = {
-                "device_id": payload.get("device_id"),
+                "device_id": device_id,
                 "result_data": payload["command_result"],
                 "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
             }
             COMMAND_LOGS.append(command_log_entry)
         
-        # Decompress each field into decompressed_payload and original_values
+        # Process sensor data if present
+        sensor_data_processed = False
         if "fields" in payload:
+            sensor_data_processed = True
             for field_name, field_data in payload["fields"].items():
                 if "payload" in field_data and field_data["payload"]:
                     compressed_payload = field_data["payload"]
@@ -791,7 +759,7 @@ def upload_data():
                     processed_payload["fields"][field_name]["decompressed_payload"] = decompressed_values
                     processed_payload["fields"][field_name]["original_values"] = original_values
 
-        # Get current time in Sri Lanka timezone
+        # Store the complete record
         sri_lanka_time = datetime.now(SRI_LANKA_TZ)
         record = {
             "received_at": sri_lanka_time.isoformat(),
@@ -799,23 +767,29 @@ def upload_data():
         }
         DATA_STORAGE.append(record)
 
-        if "fields" in processed_payload:
-            # Save a flattened copy (without wrapping) for easy grouping
+        # Store flattened copy for compression reports if sensor data was included
+        if sensor_data_processed:
             flat = dict(processed_payload)
-            # keep received time for grouping output if desired
             flat["received_at"] = record["received_at"]
             COMPRESSION_REPORTS.append(flat)
 
-        return jsonify({
+        # Build response with acknowledgment status
+        response = {
             "status": "ok",
             "ack_time": record["received_at"],
             "server_time_zone": "Asia/Colombo (GMT+5:30)",
-            "next_config": {
-                "upload_interval": 15,  # minutes (advisory for demo)
-                "sampling_rate": 5,     # seconds
-            },
-            "decompression_status": "success" if "fields" in payload else "no_compression_data"
-        })
+            "processed": {
+                "sensor_data": sensor_data_processed,
+                "config_ack": "config_ack" in payload,
+                "command_result": "command_result" in payload
+            }
+        }
+        
+        # Add decompression status if sensor data was present
+        if sensor_data_processed:
+            response["decompression_status"] = "success"
+
+        return jsonify(response)
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -841,6 +815,39 @@ def get_latest_data():
             "data": [],
             "total_reports": 0
         })
+
+
+@app.route("/api/logs", methods=["GET"])
+def get_logs():
+    """API endpoint to get the latest config and command logs"""
+    return jsonify({
+        "config_logs": CONFIG_LOGS[-10:],  # Last 10 config acknowledgments
+        "command_logs": COMMAND_LOGS[-10:]  # Last 10 command results
+    })
+
+
+@app.route("/test-ack", methods=["POST"])
+def test_acknowledgment():
+    """Test endpoint to simulate a device acknowledgment"""
+    test_ack = {
+        "device_id": "test-device",
+        "config_ack": {
+            "accepted": ["sampling_interval", "registers"],
+            "rejected": ["invalid_param"],
+            "unchanged": ["device_id"]
+        }
+    }
+    
+    # Process the test acknowledgment
+    ack_log_entry = {
+        "device_id": test_ack["device_id"],
+        "ack_data": test_ack["config_ack"],
+        "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+    }
+    CONFIG_LOGS.append(ack_log_entry)
+    print(f"[TEST CONFIG ACK] Added test acknowledgment: {test_ack['config_ack']}")
+    
+    return jsonify({"status": "Test acknowledgment added", "data": test_ack})
 
 
 @app.route("/compression_report", methods=["GET"])
@@ -893,125 +900,6 @@ def compression_display():
     return html
 
 
-@app.route("/benchmarks")
-def benchmarks_page():
-    # Build combined uploads and compute metrics
-    combined = _group_uploads_by_session()
-    # inject received_at by matching in DATA_STORAGE (best-effort)
-    ra_by_signature = {}
-    for rec in DATA_STORAGE:
-        dd = rec.get("device_data", {})
-        key = (dd.get("session_id"), dd.get("window_start_ms"), dd.get("window_end_ms"))
-        ra_by_signature[key] = rec.get("received_at")
-    rows = []
-    for u in combined:
-        sig = (u.get("session_id"), u.get("window_start_ms"), u.get("window_end_ms"))
-        u["received_at"] = ra_by_signature.get(sig)
-        rows.append(_compute_upload_benchmark(u))
-
-    # Compute overall stats
-    total_uploads = len(rows)
-    avg_ratio = (sum([r["compression_ratio"] for r in rows if r["compression_ratio"]]) / max(1, len([r for r in rows if r["compression_ratio"]]))) if rows else 0
-    avg_orig = (sum([r["original_payload_size_bytes"] for r in rows]) / total_uploads) if total_uploads else 0
-    avg_comp = (sum([r["compressed_payload_size_bytes"] for r in rows]) / total_uploads) if total_uploads else 0
-    avg_cpu = (sum([r["cpu_time_ms_total"] for r in rows]) / total_uploads) if total_uploads else 0
-
-    # Helper function for formatting timestamps in benchmarks
-    def formatTimestamp(iso_string):
-        if not iso_string:
-            return '—'
-        try:
-            # Parse the ISO string and convert to Sri Lanka time if needed
-            dt = datetime.fromisoformat(iso_string.replace('Z', '+00:00'))
-            # If it's already in Sri Lanka timezone, use as is, otherwise convert
-            if dt.tzinfo is None:
-                # Assume it's already Sri Lanka time if no timezone info
-                return dt.strftime('%Y-%m-%d %H:%M:%S')
-            elif dt.tzinfo.utcoffset(dt) == timedelta(hours=5, minutes=30):
-                # Already in Sri Lanka time
-                return dt.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                # Convert to Sri Lanka time
-                sri_lanka_time = dt.astimezone(SRI_LANKA_TZ)
-                return sri_lanka_time.strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            return iso_string
-
-    # Build HTML
-    html_rows = "".join([
-        f"""
-        <tr>
-            <td>{formatTimestamp(r.get('received_at'))}</td>
-            <td>{r['device_id']}</td>
-            <td>{r.get('session_id') or '—'}</td>
-            <td>{r['number_of_samples']}</td>
-            <td>{r['original_payload_size_bytes']}</td>
-            <td>{r['compressed_payload_size_bytes']}</td>
-            <td>{f"{r['compression_ratio']:.2f}" if r['compression_ratio'] else '—'}</td>
-            <td>{f"{r['cpu_time_ms_total']:.3f}"}</td>
-            <td>{'✅' if r['verify_ok'] else '❌'}</td>
-            <td>{r['compression_method']}</td>
-        </tr>
-        """ for r in rows
-    ])
-
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>EcoWatt Benchmarks</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f5f7fb; }}
-            .header {{ background:#2c3e50; color:#fff; padding:20px; display:flex; justify-content:space-between; align-items:center; }}
-            .btn {{ background:#3498db; color:#fff; padding:10px 14px; border-radius:8px; text-decoration:none; font-weight:bold; }}
-            .container {{ padding:20px; }}
-            .cards {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:20px; }}
-            .card {{ background:#fff; padding:16px; border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,0.06); }}
-            table {{ width:100%; border-collapse: collapse; background:#fff; box-shadow:0 6px 16px rgba(0,0,0,0.06); border-radius:12px; overflow:hidden; }}
-            th, td {{ padding: 10px 12px; border-bottom: 1px solid #eee; text-align:left; }}
-            th {{ background:#eef6ff; }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h2>EcoWatt Compression Benchmarks</h2>
-            <a class="btn" href="/">← Back to Home</a>
-        </div>
-        <div class="container">
-            <div class="cards">
-                <div class="card"><div><strong>Total Uploads</strong></div><div>{total_uploads}</div></div>
-                <div class="card"><div><strong>Avg Compression Ratio</strong></div><div>{(f"{avg_ratio:.2f}" if avg_ratio else '—')}</div></div>
-                <div class="card"><div><strong>Avg Original Size (B)</strong></div><div>{int(avg_orig)}</div></div>
-                <div class="card"><div><strong>Avg Compressed Size (B)</strong></div><div>{int(avg_comp)}</div></div>
-                <div class="card"><div><strong>Avg CPU Time (ms)</strong></div><div>{avg_cpu:.3f}</div></div>
-            </div>
-
-            <table>
-                <thead>
-                    <tr>
-                        <th>Server Received At</th>
-                        <th>Device</th>
-                        <th>Session</th>
-                        <th>Samples</th>
-                        <th>Original Bytes</th>
-                        <th>Compressed Bytes</th>
-                        <th>Ratio</th>
-                        <th>CPU ms (Total)</th>
-                        <th>Lossless</th>
-                        <th>Method</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {html_rows if html_rows else '<tr><td colspan="10">No uploads yet</td></tr>'}
-                </tbody>
-            </table>
-        </div>
-    </body>
-    </html>
-    """
-    return html
-
-
 @app.route("/config", methods=["POST"])
 def handle_config():
     """
@@ -1037,7 +925,6 @@ def handle_config():
                 "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
             }
             CONFIG_LOGS.append(ack_log_entry)
-            print(f"[CONFIG ACK] Device {device_id}: {data['config_ack']}")
 
         # Handle command execution result from device
         if "command_result" in data:
@@ -1047,7 +934,6 @@ def handle_config():
                 "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
             }
             COMMAND_LOGS.append(result_log_entry)
-            print(f"[COMMAND RESULT] Device {device_id}: {data['command_result']}")
 
         # Prepare response with any pending configuration or commands
         response = {}
