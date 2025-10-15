@@ -273,15 +273,15 @@ def index():
                         <div class="checkbox-group">
                             <div class="checkbox-item">
                                 <input type="checkbox" id="reg_ac_voltage" name="registers" value="AC_VOLTAGE" checked>
-                                <label for="reg_ac_voltage">AC Voltage</label>
+                                <label for="reg_ac_voltage">Voltage</label>
                             </div>
                             <div class="checkbox-item">
                                 <input type="checkbox" id="reg_ac_current" name="registers" value="AC_CURRENT" checked>
-                                <label for="reg_ac_current">AC Current</label>
+                                <label for="reg_ac_current">Current</label>
                             </div>
                             <div class="checkbox-item">
                                 <input type="checkbox" id="reg_ac_frequency" name="registers" value="AC_FREQUENCY" checked>
-                                <label for="reg_ac_frequency">AC Frequency</label>
+                                <label for="reg_ac_frequency">Frequency</label>
                             </div>
                             <div class="checkbox-item">
                                 <input type="checkbox" id="reg_pv1_voltage" name="registers" value="PV1_VOLTAGE">
@@ -322,7 +322,7 @@ def index():
                         <input type="text" id="cmd_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
                         <label for="target_register">Target Register:</label><br>
                         <select id="target_register" name="target_register">
-                            <option value="export_power_percent">export_power_percent</option>
+                            <option value="export_power_percent">output_power_percentage</option>
                         </select><br><br>
                         <label for="value">Value (0-100):</label><br>
                         <input type="number" id="value" name="value" min="0" max="100" required><br><br>
@@ -462,22 +462,38 @@ def set_config_from_form():
     device_id = form_data.get("device_id")
     sampling_interval = form_data.get("sampling_interval", type=int)
     
-    # Get selected registers from checkboxes
-    registers = form_data.getlist("registers")  # getlist() gets all checked checkbox values
+    # Get selected registers from checkboxes and map to spec format
+    register_mapping = {
+        "AC_VOLTAGE": "voltage",
+        "AC_CURRENT": "current", 
+        "AC_FREQUENCY": "frequency",
+        "PV1_VOLTAGE": "pv1_voltage",
+        "PV2_VOLTAGE": "pv2_voltage",
+        "PV1_CURRENT": "pv1_current",
+        "PV2_CURRENT": "pv2_current",
+        "TEMPERATURE": "temperature",
+        "EXPORT_POWER_PERCENT": "export_power_percent",
+        "OUTPUT_POWER": "output_power"
+    }
+    
+    selected_registers = form_data.getlist("registers")
+    # Map to specification format
+    spec_registers = [register_mapping.get(reg, reg.lower()) for reg in selected_registers]
 
     if not device_id or not sampling_interval:
         return "Error: Missing device_id or sampling_interval", 400
     
-    if not registers:
+    if not spec_registers:
         return "Error: At least one register must be selected", 400
 
+    # Store configuration in exact specification format
     config = {
         "sampling_interval": sampling_interval,
-        "registers": registers
+        "registers": spec_registers
     }
     PENDING_CONFIGS[device_id] = config
 
-    return f"Configuration for {device_id} has been queued. Registers: {', '.join(registers)}. It will be sent on the device's next check-in."
+    return f"Configuration for {device_id} has been queued. Registers: {', '.join(spec_registers)}. It will be sent on the device's next check-in."
 
 
 @app.route("/queue-command", methods=["POST"])
@@ -490,14 +506,21 @@ def queue_command_from_form():
     if not device_id or not target_register or value is None:
         return "Error: Missing device_id, target_register, or value", 400
 
+    # Map form values to specification format
+    register_mapping = {
+        "export_power_percent": "output_power_percentage"
+    }
+    spec_target_register = register_mapping.get(target_register, target_register)
+
+    # Store command in exact specification format
     command = {
         "action": "write_register",
-        "target_register": target_register,
+        "target_register": spec_target_register,
         "value": value
     }
     PENDING_COMMANDS[device_id] = command
 
-    return f"Command for {device_id} has been queued. It will be sent on the device's next check-in."
+    return f"Command for {device_id} has been queued (target: {spec_target_register}, value: {value}). It will be sent on the device's next check-in."
 
 
 @app.route("/upload", methods=["POST"])
@@ -751,40 +774,71 @@ def benchmarks_page():
     return html
 
 
-@app.route("/config", methods=["POST"])
-def handle_config():
-    data = request.json
-    device_id = data.get("device_id")
+@app.route("/device/poll", methods=["POST"])
+def device_poll():
+    """
+    Unified endpoint for device polling - handles both status updates and configuration/command delivery.
+    
+    Device sends status updates and receives configuration updates or commands in response.
+    Device can also send acknowledgments and command results.
+    """
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+        
+        device_id = data.get("device_id")
+        if not device_id:
+            return jsonify({"status": "error", "message": "device_id is required"}), 400
 
-    if not device_id:
-        return jsonify({"status": "error", "message": "device_id is required"}), 400
+        # Handle configuration acknowledgment from device
+        if "config_ack" in data:
+            ack_log_entry = {
+                "device_id": device_id,
+                "ack_data": data["config_ack"],
+                "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+            }
+            CONFIG_LOGS.append(ack_log_entry)
+            print(f"[CONFIG ACK] Device {device_id}: {data['config_ack']}")
 
-    # Scenario 1: Device is sending an acknowledgment
-    if "config_ack" in data:
-        ack_log_entry = {
-            "device_id": device_id,
-            "ack_data": data["config_ack"],
-            "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
-        }
-        CONFIG_LOGS.append(ack_log_entry)
-        return jsonify({"status": "ack_received"})
+        # Handle command execution result from device
+        if "command_result" in data:
+            result_log_entry = {
+                "device_id": device_id,
+                "result_data": data["command_result"],
+                "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+            }
+            COMMAND_LOGS.append(result_log_entry)
+            print(f"[COMMAND RESULT] Device {device_id}: {data['command_result']}")
 
-    # Scenario 2: Device is checking for a new config or command
-    elif data.get("status") == "ready":
+        # Prepare response with any pending configuration or commands
         response = {}
-        # Check for pending configuration
+        
+        # Check for pending configuration update
         if device_id in PENDING_CONFIGS:
-            response["config_update"] = PENDING_CONFIGS.pop(device_id) # pop to send only once
+            config = PENDING_CONFIGS.pop(device_id)  # Send only once
+            response["config_update"] = config
+            print(f"[CONFIG SENT] To device {device_id}: {config}")
 
-        # Check for pending command (for Part 2)
+        # Check for pending command
         if device_id in PENDING_COMMANDS:
-            response["command"] = PENDING_COMMANDS.pop(device_id) # pop to send only once
+            command = PENDING_COMMANDS.pop(device_id)  # Send only once
+            response["command"] = command
+            print(f"[COMMAND SENT] To device {device_id}: {command}")
 
         return jsonify(response)
 
-    return jsonify({"status": "unknown_request"}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# Keep the old /config endpoint for backward compatibility
+@app.route("/config", methods=["POST"])
+def handle_config_legacy():
+    """Legacy endpoint - redirects to new /device/poll endpoint"""
+    return device_poll()
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=True)
