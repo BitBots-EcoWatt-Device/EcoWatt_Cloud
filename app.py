@@ -244,6 +244,11 @@ def index():
             input[type="text"], input[type="number"], select {{ width: 100%; padding: 8px; margin: 4px 0 8px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
             input[type="submit"] {{ background-color: var(--accent); color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 8px; }}
             input[type="submit"]:hover {{ background-color: #2980b9; }}
+            /* NEW: Checkbox group styling */
+            .checkbox-group {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0 12px 0; }}
+            .checkbox-item {{ display: flex; align-items: center; padding: 4px 8px; }}
+            .checkbox-item input[type="checkbox"] {{ margin-right: 8px; width: auto; }}
+            .checkbox-item label {{ margin: 0; font-weight: normal; }}
             /* NEW: Field values styling */
             .field-values {{ font-family: monospace; font-size: 12px; background-color: #f8f9fa; padding: 4px; border-radius: 3px; max-width: 150px; word-wrap: break-word; }}
         </style>
@@ -261,11 +266,52 @@ def index():
                     <h3>Set Device Configuration</h3>
                     <form action="/set-config" method="POST">
                         <label for="cfg_device_id">Device ID:</label><br>
-                        <input type="text" id="cfg_device_id" name="device_id" required><br><br>
+                        <input type="text" id="cfg_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
                         <label for="sampling_interval">Sampling Interval (ms):</label><br>
                         <input type="number" id="sampling_interval" name="sampling_interval" value="5000" required><br><br>
-                        <label for="registers">Registers (comma-separated):</label><br>
-                        <input type="text" id="registers" name="registers" value="voltage,current,power" required size="40"><br><br>
+                        <label>Registers to monitor:</label><br>
+                        <div class="checkbox-group">
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_ac_voltage" name="registers" value="AC_VOLTAGE" checked>
+                                <label for="reg_ac_voltage">AC Voltage</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_ac_current" name="registers" value="AC_CURRENT" checked>
+                                <label for="reg_ac_current">AC Current</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_ac_frequency" name="registers" value="AC_FREQUENCY" checked>
+                                <label for="reg_ac_frequency">AC Frequency</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_pv1_voltage" name="registers" value="PV1_VOLTAGE">
+                                <label for="reg_pv1_voltage">PV1 Voltage</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_pv2_voltage" name="registers" value="PV2_VOLTAGE">
+                                <label for="reg_pv2_voltage">PV2 Voltage</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_pv1_current" name="registers" value="PV1_CURRENT">
+                                <label for="reg_pv1_current">PV1 Current</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_pv2_current" name="registers" value="PV2_CURRENT">
+                                <label for="reg_pv2_current">PV2 Current</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_temperature" name="registers" value="TEMPERATURE">
+                                <label for="reg_temperature">Temperature</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_export_power" name="registers" value="EXPORT_POWER_PERCENT">
+                                <label for="reg_export_power">Export Power Percent</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="reg_output_power" name="registers" value="OUTPUT_POWER">
+                                <label for="reg_output_power">Output Power</label>
+                            </div>
+                        </div><br>
                         <input type="submit" value="Queue Configuration">
                     </form>
                 </div>
@@ -273,7 +319,7 @@ def index():
                     <h3>Queue Inverter Command</h3>
                     <form action="/queue-command" method="POST">
                         <label for="cmd_device_id">Device ID:</label><br>
-                        <input type="text" id="cmd_device_id" name="device_id" required><br><br>
+                        <input type="text" id="cmd_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
                         <label for="target_register">Target Register:</label><br>
                         <select id="target_register" name="target_register">
                             <option value="export_power_percent">export_power_percent</option>
@@ -415,13 +461,15 @@ def set_config_from_form():
     form_data = request.form
     device_id = form_data.get("device_id")
     sampling_interval = form_data.get("sampling_interval", type=int)
-    registers_str = form_data.get("registers", "")
+    
+    # Get selected registers from checkboxes
+    registers = form_data.getlist("registers")  # getlist() gets all checked checkbox values
 
     if not device_id or not sampling_interval:
         return "Error: Missing device_id or sampling_interval", 400
-
-    # Convert comma-separated string to a list of strings
-    registers = [reg.strip() for reg in registers_str.split(',') if reg.strip()]
+    
+    if not registers:
+        return "Error: At least one register must be selected", 400
 
     config = {
         "sampling_interval": sampling_interval,
@@ -429,7 +477,7 @@ def set_config_from_form():
     }
     PENDING_CONFIGS[device_id] = config
 
-    return f"Configuration for {device_id} has been queued. It will be sent on the device's next check-in."
+    return f"Configuration for {device_id} has been queued. Registers: {', '.join(registers)}. It will be sent on the device's next check-in."
 
 
 @app.route("/queue-command", methods=["POST"])
