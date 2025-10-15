@@ -123,11 +123,17 @@ def validate_secure_payload(data):
         # Verify the HMAC signature to ensure authenticity and integrity
         # Reconstruct the exact "canonical message" that was signed on the ESP8266.
         message_to_sign = f"{nonce}.{encoded_payload}".encode('utf-8')
+        
+        print(f"[DEBUG] Message to sign length: {len(message_to_sign)} bytes")
+        print(f"[DEBUG] PSK for device: {psk[:16]}...{psk[-16:]}")
 
         # Calculate our own version of the HMAC signature
         key_bytes = psk.encode('utf-8')
         h = hmac.new(key_bytes, message_to_sign, hashlib.sha256)
         calculated_mac_hex = h.hexdigest()
+        
+        print(f"[DEBUG] Calculated MAC: {calculated_mac_hex[:16]}...{calculated_mac_hex[-16:]}")
+        print(f"[DEBUG] Received   MAC: {received_mac_hex[:16]}...{received_mac_hex[-16:]}")
 
         # Compare the received MAC with our calculated one. Use hmac.compare_digest for security.
         if not hmac.compare_digest(calculated_mac_hex, received_mac_hex):
@@ -989,23 +995,33 @@ def handle_config():
     Device can also send acknowledgments and command results.
     """
     try:
-        insecure_data = request.json
-                
-        # The secure wrapper itself is not signed, so we can extract the device_id first.
-        if not insecure_data or "device_id" not in insecure_data:
-            return jsonify({"status": "error", "message": "device_id is required"}), 400
+        print(f"\n[CONFIG DEBUG] ===== NEW CONFIG REQUEST =====")
+        # The new secure format contains only nonce, payload, and mac
+        secure_data = request.json
         
-        # Pass the entire payload to the validation function
-        data = validate_secure_payload(insecure_data)
+        print(f"[CONFIG DEBUG] Request content type: {request.content_type}")
+        print(f"[CONFIG DEBUG] Request data size: {len(str(secure_data)) if secure_data else 0} chars")
+                
+        if not secure_data:
+            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+        
+        # Validate the secure payload - device_id is now inside the encrypted data
+        data = validate_secure_payload(secure_data)
 
         if data is None:
             # If validation fails, reject the request.
+            print(f"[CONFIG DEBUG] Validation failed, rejecting request")
             return jsonify({"status": "error", "message": "Security validation failed"}), 403 # 403 Forbidden
 
+        print(f"[CONFIG DEBUG] Validation successful, processing payload...")
         device_id = data.get("device_id")
+        
+        print(f"[CONFIG DEBUG] Processing config request from device: {device_id}")
+        print(f"[CONFIG DEBUG] Payload contains: {list(data.keys())}")
 
         # Handle configuration acknowledgment from device
         if "config_ack" in data:
+            print(f"[CONFIG DEBUG] Processing config acknowledgment: {data['config_ack']}")
             ack_log_entry = {
                 "device_id": device_id,
                 "ack_data": data["config_ack"],
@@ -1015,6 +1031,7 @@ def handle_config():
 
         # Handle command execution result from device
         if "command_result" in data:
+            print(f"[CONFIG DEBUG] Processing command result: {data['command_result']}")
             result_log_entry = {
                 "device_id": device_id,
                 "result_data": data["command_result"],
@@ -1029,17 +1046,23 @@ def handle_config():
         if device_id in PENDING_CONFIGS:
             config = PENDING_CONFIGS.pop(device_id)  # Send only once
             response["config_update"] = config
-            print(f"[CONFIG SENT] To device {device_id}: {config}")
+            print(f"[CONFIG DEBUG] Sending pending config to device {device_id}: {config}")
 
         # Check for pending command
         if device_id in PENDING_COMMANDS:
             command = PENDING_COMMANDS.pop(device_id)  # Send only once
             response["command"] = command
-            print(f"[COMMAND SENT] To device {device_id}: {command}")
+            print(f"[CONFIG DEBUG] Sending pending command to device {device_id}: {command}")
 
+        print(f"[CONFIG DEBUG] Sending response: {response}")
+        print(f"[CONFIG DEBUG] ===== CONFIG REQUEST COMPLETE =====\n")
         return jsonify(response)
 
     except Exception as e:
+        print(f"[CONFIG DEBUG] ERROR: Exception occurred: {str(e)}")
+        print(f"[CONFIG DEBUG] Exception type: {type(e).__name__}")
+        import traceback
+        print(f"[CONFIG DEBUG] Traceback: {traceback.format_exc()}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
