@@ -3,6 +3,10 @@ from datetime import datetime, timezone, timedelta
 import os
 import json
 from collections import defaultdict
+import hmac
+import hashlib
+import base64
+import json
 
 # Sri Lanka timezone (GMT+5:30)
 SRI_LANKA_TZ = timezone(timedelta(hours=5, minutes=30))
@@ -35,6 +39,13 @@ CONFIG_LOGS = []
 # Stores command result logs from devices
 COMMAND_LOGS = []
 
+# Stores the PSK for each known device.
+DEVICE_PSKS = {
+    "bitbots-ecoWatt": "E5A3C8B2F0D9E8A1C5B3A2D8F0E9C4B2A1D8E5C3B0A9F8E2D1C0B7A6F5E4D3C2"
+}
+
+# Stores the last successfully validated nonce for each device to prevent replay attacks.
+DEVICE_NONCES = defaultdict(int) # Defaults new devices to a nonce of 0
 
 def _group_uploads_by_session():
     """
@@ -74,6 +85,66 @@ def _group_uploads_by_session():
 
     return [groups[k] for k in order]
 
+def validate_secure_payload(data):
+    """
+    Validates an incoming secure payload. Checks the nonce and HMAC signature.
+    Returns the decoded JSON payload on success, or None on failure.
+    NEW FORMAT: device_id is now inside the encrypted payload, not outside.
+    """
+    try:
+        # Extract required fields from the new secure format
+        nonce = int(data['nonce'])
+        encoded_payload = data['payload']
+        received_mac_hex = data['mac']
+
+        # First, decode the Base64 payload to get the original JSON and extract device_id
+        decoded_payload_bytes = base64.b64decode(encoded_payload)
+        decoded_payload = json.loads(decoded_payload_bytes.decode('utf-8'))
+        
+        # Extract device_id from the decoded payload
+        device_id = decoded_payload.get('device_id')
+        if not device_id:
+            print(f"[SECURITY] REJECT: No device_id found in decoded payload")
+            return None
+
+        # Check if the device and its key are known
+        if device_id not in DEVICE_PSKS:
+            print(f"[SECURITY] REJECT: Unknown device_id '{device_id}'")
+            return None
+        
+        psk = DEVICE_PSKS[device_id]
+        last_nonce = DEVICE_NONCES[device_id]
+
+        # Check the Nonce to prevent replay attacks
+        if nonce <= last_nonce:
+            print(f"[SECURITY] REJECT: Replay attack detected for {device_id}. Received nonce: {nonce}, last valid nonce: {last_nonce}")
+            return None
+
+        # Verify the HMAC signature to ensure authenticity and integrity
+        # Reconstruct the exact "canonical message" that was signed on the ESP8266.
+        message_to_sign = f"{nonce}.{encoded_payload}".encode('utf-8')
+
+        # Calculate our own version of the HMAC signature
+        key_bytes = psk.encode('utf-8')
+        h = hmac.new(key_bytes, message_to_sign, hashlib.sha256)
+        calculated_mac_hex = h.hexdigest()
+
+        # Compare the received MAC with our calculated one. Use hmac.compare_digest for security.
+        if not hmac.compare_digest(calculated_mac_hex, received_mac_hex):
+            print(f"[SECURITY] REJECT: Invalid HMAC signature for {device_id}.")
+            return None
+
+        # Success! Update the nonce for this device to prevent reuse of the current one.
+        DEVICE_NONCES[device_id] = nonce
+        
+        print(f"[SECURITY] ACCEPT: Successfully validated payload from {device_id} with nonce {nonce}.")
+        
+        # Return the trusted, decoded data
+        return decoded_payload
+
+    except (KeyError, ValueError, Exception) as e:
+        print(f"[SECURITY] REJECT: Error during validation: {str(e)}")
+        return None
 
 @app.route("/")
 def index():
@@ -720,9 +791,18 @@ def queue_command_from_form():
 @app.route("/upload", methods=["POST"])
 def upload_data():
     try:
-        payload = request.json
-        if not payload:
+        # The new secure format contains only nonce, payload, and mac
+        secure_data = request.json
+                
+        if not secure_data:
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+        
+        # Validate the secure payload - device_id is now inside the encrypted data
+        payload = validate_secure_payload(secure_data)
+
+        if payload is None:
+            # If validation fails, reject the request.
+            return jsonify({"status": "error", "message": "Security validation failed"}), 403 # 403 Forbidden
 
         processed_payload = dict(payload)
         device_id = payload.get("device_id", "Unknown")
@@ -909,13 +989,20 @@ def handle_config():
     Device can also send acknowledgments and command results.
     """
     try:
-        data = request.json
-        if not data:
-            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
-        
-        device_id = data.get("device_id")
-        if not device_id:
+        insecure_data = request.json
+                
+        # The secure wrapper itself is not signed, so we can extract the device_id first.
+        if not insecure_data or "device_id" not in insecure_data:
             return jsonify({"status": "error", "message": "device_id is required"}), 400
+        
+        # Pass the entire payload to the validation function
+        data = validate_secure_payload(insecure_data)
+
+        if data is None:
+            # If validation fails, reject the request.
+            return jsonify({"status": "error", "message": "Security validation failed"}), 403 # 403 Forbidden
+
+        device_id = data.get("device_id")
 
         # Handle configuration acknowledgment from device
         if "config_ack" in data:
