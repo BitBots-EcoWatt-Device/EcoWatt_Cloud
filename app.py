@@ -251,6 +251,51 @@ def index():
             .checkbox-item label {{ margin: 0; font-weight: normal; }}
             /* NEW: Field values styling */
             .field-values {{ font-family: monospace; font-size: 12px; background-color: #f8f9fa; padding: 4px; border-radius: 3px; max-width: 150px; word-wrap: break-word; }}
+            /* NEW: Popup notification styles */
+            .popup-notification {{
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 16px 20px;
+                border-radius: 8px;
+                color: white;
+                font-weight: bold;
+                z-index: 1000;
+                max-width: 450px;
+                min-width: 300px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                transform: translateX(100%);
+                transition: transform 0.3s ease-in-out;
+                font-size: 14px;
+                line-height: 1.3;
+            }}
+            .popup-notification.show {{
+                transform: translateX(0);
+            }}
+            .popup-notification.success {{
+                background-color: #27ae60;
+            }}
+            .popup-notification.error {{
+                background-color: #e74c3c;
+            }}
+            .popup-notification .close-btn {{
+                float: right;
+                margin-left: 10px;
+                cursor: pointer;
+                font-size: 18px;
+                line-height: 1;
+                opacity: 0.8;
+            }}
+            .popup-notification .close-btn:hover {{
+                opacity: 1;
+            }}
+            .popup-notification ul {{
+                margin: 4px 0;
+                padding-left: 20px;
+            }}
+            .popup-notification li {{
+                margin: 2px 0;
+            }}
         </style>
     </head>
     <body>
@@ -264,7 +309,7 @@ def index():
             <div class="cards">
                 <div class="card">
                     <h3>Set Device Configuration</h3>
-                    <form action="/set-config" method="POST">
+                    <form id="configForm" onsubmit="submitConfigForm(event)">
                         <label for="cfg_device_id">Device ID:</label><br>
                         <input type="text" id="cfg_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
                         <label for="sampling_interval">Sampling Interval (ms):</label><br>
@@ -317,7 +362,7 @@ def index():
                 </div>
                 <div class="card">
                     <h3>Queue Inverter Command</h3>
-                    <form action="/queue-command" method="POST">
+                    <form id="commandForm" onsubmit="submitCommandForm(event)">
                         <label for="cmd_device_id">Device ID:</label><br>
                         <input type="text" id="cmd_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
                         <label for="target_register">Target Register:</label><br>
@@ -377,6 +422,7 @@ def index():
                     return '—'; 
                 }} 
             }}
+            
             function createFieldsDisplay(fields) {{
                 // Create a formatted display of all fields and their values
                 let html = '';
@@ -389,6 +435,158 @@ def index():
                     }}
                 }}
                 return html;
+            }}
+
+            function showPopup(message, isSuccess = true, data = null) {{
+                // Remove any existing popups
+                const existingPopups = document.querySelectorAll('.popup-notification');
+                existingPopups.forEach(popup => popup.remove());
+
+                // Create new popup
+                const popup = document.createElement('div');
+                popup.className = `popup-notification ${{isSuccess ? 'success' : 'error'}}`;
+                
+                let content = `<span class="close-btn" onclick="this.parentElement.remove()">&times;</span>`;
+                
+                if (data && data.config) {{
+                    // Format configuration data nicely
+                    content += `
+                        <div style="margin-bottom: 8px;"><strong>✅ Configuration Queued Successfully!</strong></div>
+                        <div style="font-size: 13px; line-height: 1.4;">
+                            <div><strong>Device:</strong> ${{data.config.device_id}}</div>
+                            <div><strong>Sampling Interval:</strong> ${{data.config.sampling_interval}}ms</div>
+                            <div><strong>Registers:</strong></div>
+                            <ul style="margin: 4px 0; padding-left: 20px; font-size: 12px;">
+                                ${{data.config.registers.map(reg => `<li>${{reg}}</li>`).join('')}}
+                            </ul>
+                        </div>
+                    `;
+                }} else if (data && data.command) {{
+                    // Format command data nicely
+                    content += `
+                        <div style="margin-bottom: 8px;"><strong>✅ Command Queued Successfully!</strong></div>
+                        <div style="font-size: 13px; line-height: 1.4;">
+                            <div><strong>Device:</strong> ${{data.command.device_id}}</div>
+                            <div><strong>Action:</strong> ${{data.command.action}}</div>
+                            <div><strong>Target Register:</strong> ${{data.command.target_register}}</div>
+                            <div><strong>Value:</strong> ${{data.command.value}}</div>
+                        </div>
+                    `;
+                }} else {{
+                    // Fallback to simple message
+                    content += message;
+                }}
+                
+                popup.innerHTML = content;
+                
+                document.body.appendChild(popup);
+                
+                // Show popup with animation
+                setTimeout(() => popup.classList.add('show'), 100);
+                
+                // Auto-remove after 7 seconds (longer for detailed content)
+                setTimeout(() => {{
+                    if (popup.parentElement) {{
+                        popup.classList.remove('show');
+                        setTimeout(() => popup.remove(), 300);
+                    }}
+                }}, 7000);
+            }}
+
+            function submitConfigForm(event) {{
+                event.preventDefault();
+                
+                const form = document.getElementById('configForm');
+                const formData = new FormData(form);
+                
+                // Convert FormData to JSON
+                const data = {{}};
+                data.device_id = formData.get('device_id');
+                data.sampling_interval = parseInt(formData.get('sampling_interval'));
+                data.registers = formData.getAll('registers');
+                
+                fetch('/set-config', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                    }},
+                    body: JSON.stringify(data)
+                }})
+                .then(response => response.json())
+                .then(result => {{
+                    if (result.success) {{
+                        // Create structured data for popup
+                        const popupData = {{
+                            config: {{
+                                device_id: data.device_id,
+                                sampling_interval: data.sampling_interval,
+                                registers: data.registers.map(reg => {{
+                                    // Map display names for better readability
+                                    const displayMap = {{
+                                        'AC_VOLTAGE': 'Voltage',
+                                        'AC_CURRENT': 'Current',
+                                        'AC_FREQUENCY': 'Frequency',
+                                        'PV1_VOLTAGE': 'PV1 Voltage',
+                                        'PV2_VOLTAGE': 'PV2 Voltage',
+                                        'PV1_CURRENT': 'PV1 Current',
+                                        'PV2_CURRENT': 'PV2 Current',
+                                        'TEMPERATURE': 'Temperature',
+                                        'EXPORT_POWER_PERCENT': 'Output Power Percentage',
+                                        'OUTPUT_POWER': 'Power'
+                                    }};
+                                    return displayMap[reg] || reg;
+                                }})
+                            }}
+                        }};
+                        showPopup('', true, popupData);
+                    }} else {{
+                        showPopup(result.message, false);
+                    }}
+                }})
+                .catch(error => {{
+                    showPopup('Error submitting configuration: ' + error.message, false);
+                }});
+            }}
+
+            function submitCommandForm(event) {{
+                event.preventDefault();
+                
+                const form = document.getElementById('commandForm');
+                const formData = new FormData(form);
+                
+                // Convert FormData to JSON
+                const data = {{}};
+                data.device_id = formData.get('device_id');
+                data.target_register = formData.get('target_register');
+                data.value = parseInt(formData.get('value'));
+                
+                fetch('/queue-command', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                    }},
+                    body: JSON.stringify(data)
+                }})
+                .then(response => response.json())
+                .then(result => {{
+                    if (result.success) {{
+                        // Create structured data for popup
+                        const popupData = {{
+                            command: {{
+                                device_id: data.device_id,
+                                action: 'Write Register',
+                                target_register: 'Output Power Percentage',
+                                value: data.value + '%'
+                            }}
+                        }};
+                        showPopup('', true, popupData);
+                    }} else {{
+                        showPopup(result.message, false);
+                    }}
+                }})
+                .catch(error => {{
+                    showPopup('Error submitting command: ' + error.message, false);
+                }});
             }}
 
             function updateTable(data) {{
@@ -458,69 +656,109 @@ def index():
 
 @app.route("/set-config", methods=["POST"])
 def set_config_from_form():
-    form_data = request.form
-    device_id = form_data.get("device_id")
-    sampling_interval = form_data.get("sampling_interval", type=int)
-    
-    # Get selected registers from checkboxes and map to spec format
-    register_mapping = {
-        "AC_VOLTAGE": "voltage",
-        "AC_CURRENT": "current", 
-        "AC_FREQUENCY": "frequency",
-        "PV1_VOLTAGE": "pv1_voltage",
-        "PV2_VOLTAGE": "pv2_voltage",
-        "PV1_CURRENT": "pv1_current",
-        "PV2_CURRENT": "pv2_current",
-        "TEMPERATURE": "temperature",
-        "EXPORT_POWER_PERCENT": "export_power_percent",
-        "OUTPUT_POWER": "output_power"
-    }
-    
-    selected_registers = form_data.getlist("registers")
-    # Map to specification format
-    spec_registers = [register_mapping.get(reg, reg.lower()) for reg in selected_registers]
+    try:
+        # Handle both form data and JSON data
+        if request.content_type == 'application/json':
+            data = request.json
+            device_id = data.get("device_id")
+            sampling_interval = data.get("sampling_interval")
+            selected_registers = data.get("registers", [])
+        else:
+            form_data = request.form
+            device_id = form_data.get("device_id")
+            sampling_interval = form_data.get("sampling_interval", type=int)
+            selected_registers = form_data.getlist("registers")
+        
+        # Get selected registers from checkboxes and map to spec format
+        register_mapping = {
+            "AC_VOLTAGE": "voltage",
+            "AC_CURRENT": "current", 
+            "AC_FREQUENCY": "frequency",
+            "PV1_VOLTAGE": "pv1_voltage",
+            "PV2_VOLTAGE": "pv2_voltage",
+            "PV1_CURRENT": "pv1_current",
+            "PV2_CURRENT": "pv2_current",
+            "TEMPERATURE": "temperature",
+            "EXPORT_POWER_PERCENT": "output_power_percentage",
+            "OUTPUT_POWER": "power"
+        }
+        
+        # Map to specification format
+        spec_registers = [register_mapping.get(reg, reg.lower()) for reg in selected_registers]
 
-    if not device_id or not sampling_interval:
-        return "Error: Missing device_id or sampling_interval", 400
-    
-    if not spec_registers:
-        return "Error: At least one register must be selected", 400
+        if not device_id or not sampling_interval:
+            if request.content_type == 'application/json':
+                return jsonify({"success": False, "message": "Missing device_id or sampling_interval"}), 400
+            return "Error: Missing device_id or sampling_interval", 400
+        
+        if not spec_registers:
+            if request.content_type == 'application/json':
+                return jsonify({"success": False, "message": "At least one register must be selected"}), 400
+            return "Error: At least one register must be selected", 400
 
-    # Store configuration in exact specification format
-    config = {
-        "sampling_interval": sampling_interval,
-        "registers": spec_registers
-    }
-    PENDING_CONFIGS[device_id] = config
+        # Store configuration in exact specification format
+        config = {
+            "sampling_interval": sampling_interval,
+            "registers": spec_registers
+        }
+        PENDING_CONFIGS[device_id] = config
 
-    return f"Configuration for {device_id} has been queued. Registers: {', '.join(spec_registers)}. It will be sent on the device's next check-in."
+        message = f"Configuration for {device_id} has been queued. Registers: {', '.join(spec_registers)}. It will be sent on the device's next check-in."
+        
+        if request.content_type == 'application/json':
+            return jsonify({"success": True, "message": message})
+        return message
+        
+    except Exception as e:
+        if request.content_type == 'application/json':
+            return jsonify({"success": False, "message": str(e)}), 500
+        return f"Error: {str(e)}", 500
 
 
 @app.route("/queue-command", methods=["POST"])
 def queue_command_from_form():
-    form_data = request.form
-    device_id = form_data.get("device_id")
-    target_register = form_data.get("target_register")
-    value = form_data.get("value", type=int)
+    try:
+        # Handle both form data and JSON data
+        if request.content_type == 'application/json':
+            data = request.json
+            device_id = data.get("device_id")
+            target_register = data.get("target_register")
+            value = data.get("value")
+        else:
+            form_data = request.form
+            device_id = form_data.get("device_id")
+            target_register = form_data.get("target_register")
+            value = form_data.get("value", type=int)
 
-    if not device_id or not target_register or value is None:
-        return "Error: Missing device_id, target_register, or value", 400
+        if not device_id or not target_register or value is None:
+            if request.content_type == 'application/json':
+                return jsonify({"success": False, "message": "Missing device_id, target_register, or value"}), 400
+            return "Error: Missing device_id, target_register, or value", 400
 
-    # Map form values to specification format
-    register_mapping = {
-        "export_power_percent": "output_power_percentage"
-    }
-    spec_target_register = register_mapping.get(target_register, target_register)
+        # Map form values to specification format
+        register_mapping = {
+            "export_power_percent": "output_power_percentage"
+        }
+        spec_target_register = register_mapping.get(target_register, target_register)
 
-    # Store command in exact specification format
-    command = {
-        "action": "write_register",
-        "target_register": spec_target_register,
-        "value": value
-    }
-    PENDING_COMMANDS[device_id] = command
+        # Store command in exact specification format
+        command = {
+            "action": "write_register",
+            "target_register": spec_target_register,
+            "value": value
+        }
+        PENDING_COMMANDS[device_id] = command
 
-    return f"Command for {device_id} has been queued (target: {spec_target_register}, value: {value}). It will be sent on the device's next check-in."
+        message = f"Command for {device_id} has been queued (target: {spec_target_register}, value: {value}). It will be sent on the device's next check-in."
+        
+        if request.content_type == 'application/json':
+            return jsonify({"success": True, "message": message})
+        return message
+        
+    except Exception as e:
+        if request.content_type == 'application/json':
+            return jsonify({"success": False, "message": str(e)}), 500
+        return f"Error: {str(e)}", 500
 
 
 @app.route("/upload", methods=["POST"])
@@ -774,10 +1012,10 @@ def benchmarks_page():
     return html
 
 
-@app.route("/device/poll", methods=["POST"])
-def device_poll():
+@app.route("/config", methods=["POST"])
+def handle_config():
     """
-    Unified endpoint for device polling - handles both status updates and configuration/command delivery.
+    Configuration endpoint for device configuration updates and command delivery.
     
     Device sends status updates and receives configuration updates or commands in response.
     Device can also send acknowledgments and command results.
@@ -830,13 +1068,6 @@ def device_poll():
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# Keep the old /config endpoint for backward compatibility
-@app.route("/config", methods=["POST"])
-def handle_config_legacy():
-    """Legacy endpoint - redirects to new /device/poll endpoint"""
-    return device_poll()
 
 
 if __name__ == "__main__":
