@@ -244,6 +244,8 @@ def index():
             input[type="text"], input[type="number"], select {{ width: 100%; padding: 8px; margin: 4px 0 8px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
             input[type="submit"] {{ background-color: var(--accent); color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 8px; }}
             input[type="submit"]:hover {{ background-color: #2980b9; }}
+            /* NEW: Field values styling */
+            .field-values {{ font-family: monospace; font-size: 12px; background-color: #f8f9fa; padding: 4px; border-radius: 3px; max-width: 150px; word-wrap: break-word; }}
         </style>
     </head>
     <body>
@@ -330,31 +332,16 @@ def index():
                 }} 
             }}
             function createFieldsDisplay(fields) {{
-                let html = '<div class="fields-container">';
+                // Create a formatted display of all fields and their values
+                let html = '';
                 for (const [fieldName, fieldData] of Object.entries(fields || {{}})) {{
-                    html += `
-                        <div class="field-card">
-                            <h4>${{fieldName}}</h4>
-                            <div class="field-details">
-                                <div><strong>Samples:</strong> ${{fieldData.n_samples ?? '—'}}</div>
-                                <div><strong>Method:</strong> ${{fieldData.method ?? '—'}}</div>
-                    `;
-                    if (fieldData.payload) {{
-                        html += `
-                                <div class="payload-section">
-                                    <div><strong>Compressed Payload:</strong> [${{fieldData.payload.join(', ')}}]</div>
-                        `;
-                        if (fieldData.decompressed_payload) {{
-                            html += `<div><strong>Decompressed:</strong> [${{fieldData.decompressed_payload.join(', ')}}]</div>`;
-                        }}
-                        if (fieldData.original_values) {{
-                            html += `<div class="original-values"><strong>Original:</strong> [${{fieldData.original_values.map(v => v.toFixed(3)).join(', ')}}]</div>`;
-                        }}
-                        html += `</div>`;
+                    if (fieldData && fieldData.original_values) {{
+                        const values = fieldData.original_values.map(v => v.toFixed(3)).join(', ');
+                        html += `<div class="field-row"><strong>${{fieldName}}:</strong> ${{values}}</div>`;
+                    }} else {{
+                        html += `<div class="field-row"><strong>${{fieldName}}:</strong> —</div>`;
                     }}
-                    html += `</div></div>`;
                 }}
-                html += '</div>';
                 return html;
             }}
 
@@ -368,23 +355,34 @@ def index():
                             <thead>
                                 <tr>
                                     <th>Device ID</th>
-                                    <th>Device Timestamp</th>
-                                    <th>Fields Summary</th>
+                                    <th>Timestamp</th>
+                                    <th>Number of Fields</th>
+                                    <th>Number of Samples</th>
+                                    <th>Field Values</th>
                                     <th>Server Received At</th>
                                 </tr>
                             </thead>
                             <tbody>
                     `;
+                    
                     data.data.slice().reverse().forEach(report => {{
                         const fieldsCount = Object.keys(report.fields || {{}}).length;
+                        // Calculate total number of samples (use the max from all fields)
+                        let totalSamples = 0;
+                        if (report.fields) {{
+                            Object.values(report.fields).forEach(fieldData => {{
+                                const samples = fieldData.n_samples || 0;
+                                if (samples > totalSamples) totalSamples = samples;
+                            }});
+                        }}
+                        
                         tableHTML += `
                             <tr>
                                 <td class="device-id">${{report.device_id || 'Unknown'}}</td>
                                 <td class="timestamp">${{report.timestamp || 'N/A'}}</td>
-                                <td>
-                                    <strong>${{fieldsCount}} fields</strong><br>
-                                    ${{createFieldsDisplay(report.fields || {{}})}}
-                                </td>
+                                <td>${{fieldsCount}}</td>
+                                <td>${{totalSamples}}</td>
+                                <td class="field-values-column">${{createFieldsDisplay(report.fields || {{}})}}</td>
                                 <td class="timestamp">${{formatTimestamp(report.received_at)}}</td>
                             </tr>
                         `;
