@@ -8,6 +8,7 @@ import hashlib
 import base64
 import json
 from werkzeug.utils import secure_filename
+import math
 
 # Sri Lanka timezone (GMT+5:30)
 SRI_LANKA_TZ = timezone(timedelta(hours=5, minutes=30))
@@ -66,6 +67,50 @@ def load_existing_firmware():
     except Exception as e:
         print(f"[FIRMWARE] Error loading existing firmware files: {str(e)}")
 
+def calculate_file_hash(filepath):
+    """Calculate MD5 hash of a file"""
+    hash_md5 = hashlib.md5()
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+    except Exception as e:
+        print(f"[FOTA] Error calculating hash for {filepath}: {str(e)}")
+        return None
+
+def create_firmware_manifest(version, filepath, chunk_size=1024):
+    """Create firmware manifest for FOTA update"""
+    try:
+        file_size = os.path.getsize(filepath)
+        file_hash = calculate_file_hash(filepath)
+        
+        if file_hash is None:
+            return None
+            
+        manifest = {
+            "version": version,
+            "size": file_size,
+            "hash": file_hash,
+            "chunk_size": chunk_size,
+            "total_chunks": math.ceil(file_size / chunk_size)
+        }
+        return manifest
+    except Exception as e:
+        print(f"[FOTA] Error creating manifest for {filepath}: {str(e)}")
+        return None
+
+def get_firmware_chunk(filepath, chunk_number, chunk_size=1024):
+    """Get a specific chunk of firmware data as base64"""
+    try:
+        with open(filepath, "rb") as f:
+            f.seek(chunk_number * chunk_size)
+            chunk_data = f.read(chunk_size)
+            return base64.b64encode(chunk_data).decode('utf-8')
+    except Exception as e:
+        print(f"[FOTA] Error reading chunk {chunk_number} from {filepath}: {str(e)}")
+        return None
+
 app = Flask(__name__)
 
 # In-memory database substitute
@@ -88,6 +133,10 @@ UPLOADED_FIRMWARE = []  # List of {version, filename, filepath, uploaded_at}
 # NEW: Store firmware update logs from devices
 FIRMWARE_DOWNLOAD_LOGS = []  # Device download verification logs
 FIRMWARE_BOOT_LOGS = []      # Device boot confirmation logs
+
+# NEW: FOTA (Firmware Over-The-Air) management
+PENDING_FOTA_UPDATES = defaultdict(dict)  # Key: device_id, Value: FOTA update info
+FOTA_SESSIONS = defaultdict(dict)         # Key: device_id, Value: active download session info
 
 # Stores the PSK for each known device.
 DEVICE_PSKS = {
@@ -595,6 +644,19 @@ def index():
                             <div><strong>Location:</strong> firmware_files/ folder</div>
                         </div>
                     `;
+                }} else if (data && data.fota) {{
+                    // Format FOTA deployment data nicely
+                    content += `
+                        <div style="margin-bottom: 8px;"><strong>✅ Firmware Update Queued Successfully!</strong></div>
+                        <div style="font-size: 13px; line-height: 1.4;">
+                            <div><strong>Device:</strong> ${{data.fota.device_id}}</div>
+                            <div><strong>Firmware Version:</strong> ${{data.fota.firmware_version}}</div>
+                            <div><strong>File Size:</strong> ${{data.fota.manifest.size}} bytes</div>
+                            <div><strong>Total Chunks:</strong> ${{data.fota.manifest.total_chunks}}</div>
+                            <div><strong>Chunk Size:</strong> ${{data.fota.manifest.chunk_size}} bytes</div>
+                            <div style="margin-top: 8px; font-style: italic;">Device will receive the update on its next check-in.</div>
+                        </div>
+                    `;
                 }} else {{
                     // Fallback to simple message
                     content += message;
@@ -759,33 +821,51 @@ def index():
                 const deviceId = formData.get('device_id');
                 const firmwareVersion = formData.get('firmware_version');
                 
-                // Show placeholder message for now
-                showPopup(`Firmware update queued for device "${{deviceId}}" with version "${{firmwareVersion}}". Implementation coming soon.`, true);
+                if (!firmwareVersion) {{
+                    showPopup('Please select a firmware version.', false);
+                    return;
+                }}
                 
-                // TODO: Implement actual firmware deployment queueing
-                // fetch('/queue-firmware-update', {{
-                //     method: 'POST',
-                //     headers: {{
-                //         'Content-Type': 'application/json',
-                //     }},
-                //     body: JSON.stringify({{
-                //         device_id: deviceId,
-                //         firmware_version: firmwareVersion
-                //     }})
-                // }})
-                // .then(response => response.json())
-                // .then(result => {{
-                //     if (result.success) {{
-                //         showPopup('Firmware update queued successfully!', true);
-                //         // Start monitoring progress
-                //         startProgressMonitoring(deviceId);
-                //     }} else {{
-                //         showPopup(result.message, false);
-                //     }}
-                // }})
-                // .catch(error => {{
-                //     showPopup('Error queueing firmware update: ' + error.message, false);
-                // }});
+                // Show loading message
+                showPopup('Queueing firmware update...', true);
+                
+                fetch('/queue-firmware-update', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                    }},
+                    body: JSON.stringify({{
+                        device_id: deviceId,
+                        firmware_version: firmwareVersion
+                    }})
+                }})
+                .then(response => response.json())
+                .then(result => {{
+                    if (result.success) {{
+                        const popupData = {{
+                            fota: {{
+                                device_id: deviceId,
+                                firmware_version: result.version,
+                                manifest: result.manifest,
+                                message: result.message
+                            }}
+                        }};
+                        showPopup('', true, popupData);
+                        
+                        // Start simulated progress monitoring
+                        setTimeout(() => {{
+                            updateProgressDisplay({{
+                                status: 'Waiting for device to connect...',
+                                percentage: 0
+                            }});
+                        }}, 1000);
+                    }} else {{
+                        showPopup(result.message, false);
+                    }}
+                }})
+                .catch(error => {{
+                    showPopup('Error queueing firmware update: ' + error.message, false);
+                }});
             }}
 
             function updateProgressDisplay(progress) {{
@@ -1450,6 +1530,58 @@ def get_firmware_versions():
         return jsonify({"success": False, "message": f"Failed to retrieve versions: {str(e)}"}), 500
 
 
+@app.route("/queue-firmware-update", methods=["POST"])
+def queue_firmware_update():
+    """Queue a firmware update for a device"""
+    try:
+        data = request.json
+        device_id = data.get('device_id')
+        firmware_version = data.get('firmware_version')
+        
+        if not device_id or not firmware_version:
+            return jsonify({"success": False, "message": "Missing device_id or firmware_version"}), 400
+        
+        # Find the firmware file for the requested version
+        firmware_info = None
+        for fw in UPLOADED_FIRMWARE:
+            if fw['version'] == firmware_version:
+                firmware_info = fw
+                break
+        
+        if not firmware_info:
+            return jsonify({"success": False, "message": f"Firmware version {firmware_version} not found"}), 404
+        
+        # Create firmware manifest
+        manifest = create_firmware_manifest(firmware_version, firmware_info['filepath'])
+        if not manifest:
+            return jsonify({"success": False, "message": "Failed to create firmware manifest"}), 500
+        
+        # Store FOTA update info
+        fota_update = {
+            "device_id": device_id,
+            "firmware_version": firmware_version,
+            "firmware_info": firmware_info,
+            "manifest": manifest,
+            "queued_at": datetime.now(SRI_LANKA_TZ).isoformat(),
+            "status": "queued"
+        }
+        
+        PENDING_FOTA_UPDATES[device_id] = fota_update
+        
+        print(f"[FOTA] Queued firmware update for device {device_id}: version {firmware_version}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Firmware update queued for device {device_id}",
+            "version": firmware_version,
+            "manifest": manifest
+        })
+        
+    except Exception as e:
+        print(f"[FOTA] Error queueing firmware update: {str(e)}")
+        return jsonify({"success": False, "message": f"Failed to queue firmware update: {str(e)}"}), 500
+
+
 @app.route("/upload", methods=["POST"])
 def upload_data():
     try:
@@ -1570,6 +1702,42 @@ def get_logs():
     })
 
 
+@app.route("/api/fota-status/<device_id>", methods=["GET"])
+def get_fota_status(device_id):
+    """Get FOTA session status for a specific device"""
+    try:
+        # Check for pending FOTA update
+        if device_id in PENDING_FOTA_UPDATES:
+            return jsonify({
+                "status": "queued",
+                "fota_update": PENDING_FOTA_UPDATES[device_id]
+            })
+        
+        # Check for active FOTA session
+        if device_id in FOTA_SESSIONS:
+            session = FOTA_SESSIONS[device_id]
+            progress_percentage = 0
+            if session["manifest"]["total_chunks"] > 0:
+                progress_percentage = (session.get("last_ack_chunk", -1) + 1) / session["manifest"]["total_chunks"] * 100
+            
+            return jsonify({
+                "status": "active",
+                "session": session,
+                "progress": {
+                    "current_chunk": session.get("last_ack_chunk", -1) + 1,
+                    "total_chunks": session["manifest"]["total_chunks"],
+                    "percentage": min(progress_percentage, 100),
+                    "bytes_downloaded": (session.get("last_ack_chunk", -1) + 1) * session["manifest"]["chunk_size"],
+                    "total_bytes": session["manifest"]["size"]
+                }
+            })
+        
+        return jsonify({"status": "none"})
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/test-ack", methods=["POST"])
 def test_acknowledgment():
     """Test endpoint to simulate a device acknowledgment"""
@@ -1592,6 +1760,56 @@ def test_acknowledgment():
     print(f"[TEST CONFIG ACK] Added test acknowledgment: {test_ack['config_ack']}")
     
     return jsonify({"status": "Test acknowledgment added", "data": test_ack})
+
+
+@app.route("/test-fota-ack", methods=["POST"])
+def test_fota_acknowledgment():
+    """Test endpoint to simulate a device FOTA acknowledgment"""
+    data = request.json or {}
+    device_id = data.get("device_id", "bitbots-ecoWatt")
+    chunk_number = data.get("chunk_number", 0)
+    verified = data.get("verified", True)
+    
+    test_fota_ack = {
+        "device_id": device_id,
+        "fota_status": {
+            "chunk_received": chunk_number,
+            "verified": verified
+        }
+    }
+    
+    # Process the test FOTA acknowledgment (simulate the device sending this)
+    if device_id in FOTA_SESSIONS:
+        session = FOTA_SESSIONS[device_id]
+        session["last_ack_chunk"] = chunk_number
+        session["last_ack_verified"] = verified
+        session["last_ack_time"] = datetime.now(SRI_LANKA_TZ).isoformat()
+        
+        if verified:
+            session["current_chunk"] = chunk_number + 1
+            
+            # Check if download is complete
+            if chunk_number >= session["manifest"]["total_chunks"] - 1:
+                session["status"] = "completed"
+                
+                # Log successful download
+                download_log_entry = {
+                    "device_id": device_id,
+                    "download_data": {
+                        "status": "success",
+                        "firmware_version": session["firmware_version"],
+                        "file_size": session["manifest"]["size"],
+                        "checksum_verified": True
+                    },
+                    "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+                }
+                FIRMWARE_DOWNLOAD_LOGS.append(download_log_entry)
+        else:
+            session["retry_chunk"] = chunk_number
+    
+    print(f"[TEST FOTA ACK] Added test FOTA acknowledgment for device {device_id}: chunk {chunk_number}, verified: {verified}")
+    
+    return jsonify({"status": "Test FOTA acknowledgment added", "data": test_fota_ack})
 
 
 @app.route("/compression_report", methods=["GET"])
@@ -1697,6 +1915,50 @@ def handle_config():
             }
             COMMAND_LOGS.append(result_log_entry)
 
+        # Handle FOTA acknowledgment from device
+        if "fota_status" in data:
+            print(f"[FOTA] Processing FOTA acknowledgment: {data['fota_status']}")
+            fota_status = data["fota_status"]
+            
+            # Update FOTA session with acknowledgment
+            if device_id in FOTA_SESSIONS:
+                session = FOTA_SESSIONS[device_id]
+                chunk_received = fota_status.get("chunk_received")
+                verified = fota_status.get("verified", False)
+                
+                if chunk_received is not None:
+                    session["last_ack_chunk"] = chunk_received
+                    session["last_ack_verified"] = verified
+                    session["last_ack_time"] = datetime.now(SRI_LANKA_TZ).isoformat()
+                    
+                    print(f"[FOTA] Device {device_id} acknowledged chunk {chunk_received}, verified: {verified}")
+                    
+                    # If verification failed, mark for retransmission
+                    if not verified:
+                        session["retry_chunk"] = chunk_received
+                        print(f"[FOTA] Chunk {chunk_received} verification failed, marking for retry")
+                    else:
+                        # Update progress
+                        session["current_chunk"] = chunk_received + 1
+                        
+                        # Check if download is complete
+                        if chunk_received >= session["manifest"]["total_chunks"] - 1:
+                            session["status"] = "completed"
+                            print(f"[FOTA] Download completed for device {device_id}")
+                            
+                            # Log successful download
+                            download_log_entry = {
+                                "device_id": device_id,
+                                "download_data": {
+                                    "status": "success",
+                                    "firmware_version": session["firmware_version"],
+                                    "file_size": session["manifest"]["size"],
+                                    "checksum_verified": True
+                                },
+                                "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+                            }
+                            FIRMWARE_DOWNLOAD_LOGS.append(download_log_entry)
+
         # Prepare response with any pending configuration or commands
         response = {}
         
@@ -1711,6 +1973,87 @@ def handle_config():
             command = PENDING_COMMANDS.pop(device_id)  # Send only once
             response["command"] = command
             print(f"[CONFIG DEBUG] Sending pending command to device {device_id}: {command}")
+
+        # Check for pending FOTA update
+        if device_id in PENDING_FOTA_UPDATES:
+            fota_update = PENDING_FOTA_UPDATES[device_id]
+            
+            # Check if there's an active session or start new one
+            if device_id not in FOTA_SESSIONS:
+                # Start new FOTA session
+                session = {
+                    "device_id": device_id,
+                    "firmware_version": fota_update["firmware_version"],
+                    "firmware_info": fota_update["firmware_info"],
+                    "manifest": fota_update["manifest"],
+                    "current_chunk": 0,
+                    "status": "active",
+                    "started_at": datetime.now(SRI_LANKA_TZ).isoformat(),
+                    "last_ack_chunk": -1,
+                    "last_ack_verified": False,
+                    "retry_chunk": None
+                }
+                FOTA_SESSIONS[device_id] = session
+                
+                # Send manifest to device
+                response["fota"] = {
+                    "manifest": fota_update["manifest"],
+                    "next_chunk": 0
+                }
+                print(f"[FOTA] Starting FOTA session for device {device_id}, sending manifest")
+                
+                # Remove from pending updates since session is now active
+                PENDING_FOTA_UPDATES.pop(device_id)
+                
+        # Handle ongoing FOTA session - send next chunk
+        elif device_id in FOTA_SESSIONS:
+            session = FOTA_SESSIONS[device_id]
+            
+            if session["status"] == "active":
+                # Determine which chunk to send
+                chunk_to_send = session.get("retry_chunk")
+                if chunk_to_send is None:
+                    chunk_to_send = session["current_chunk"]
+                else:
+                    # Clear retry flag
+                    session["retry_chunk"] = None
+                
+                # Check if we still have chunks to send
+                if chunk_to_send < session["manifest"]["total_chunks"]:
+                    # Get chunk data
+                    chunk_data = get_firmware_chunk(
+                        session["firmware_info"]["filepath"],
+                        chunk_to_send,
+                        session["manifest"]["chunk_size"]
+                    )
+                    
+                    if chunk_data:
+                        # Calculate HMAC for chunk
+                        device_psk = DEVICE_PSKS.get(device_id)
+                        if device_psk:
+                            chunk_mac = hmac.new(
+                                bytes.fromhex(device_psk),
+                                chunk_data.encode('utf-8'),
+                                hashlib.sha256
+                            ).hexdigest()
+                        else:
+                            chunk_mac = "no_psk"
+                        
+                        response["fota"] = {
+                            "chunk_number": chunk_to_send,
+                            "data": chunk_data,
+                            "mac": chunk_mac,
+                            "total_chunks": session["manifest"]["total_chunks"]
+                        }
+                        
+                        print(f"[FOTA] Sending chunk {chunk_to_send}/{session['manifest']['total_chunks']} to device {device_id}")
+                    else:
+                        print(f"[FOTA] Error reading chunk {chunk_to_send} for device {device_id}")
+                        
+            elif session["status"] == "completed":
+                # Clean up completed session
+                FOTA_SESSIONS.pop(device_id)
+                print(f"[FOTA] Cleaned up completed session for device {device_id}")
 
         print(f"[CONFIG DEBUG] Sending response: {response}")
         print(f"[CONFIG DEBUG] ===== CONFIG REQUEST COMPLETE =====\n")
