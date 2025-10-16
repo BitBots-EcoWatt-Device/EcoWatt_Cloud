@@ -884,15 +884,23 @@ def index():
                         progressBar.style.display = 'block';
                         progressText.style.display = 'block';
                         progressBarFill.style.width = progress.percentage + '%';
-                        progressText.textContent = `${{progress.percentage}}% (${{progress.downloaded || 0}} / ${{progress.total || 0}} bytes)`;
+                        progressText.textContent = `${{progress.percentage}}% (${{progress.downloaded || '0 B'}} / ${{progress.total || '0 B'}})`;
                     }}
 
-                    if (progress.completed) {{
-                        progressStatus.textContent = '✅ Download completed successfully';
+                    // Enable reboot button ONLY when download is 100% complete AND verified
+                    if (progress.completed && progress.percentage >= 100) {{
+                        progressStatus.textContent = '✅ Download completed successfully - Ready to apply firmware update';
                         progressStatus.style.color = '#27ae60';
+                        progressBarFill.style.width = '100%';
                         rebootBtn.style.opacity = '1';
                         rebootBtn.disabled = false;
                         rebootBtn.style.backgroundColor = '#e74c3c';
+                        rebootBtn.style.cursor = 'pointer';
+                    }} else {{
+                        // Keep reboot button disabled until 100% complete
+                        rebootBtn.style.opacity = '0.5';
+                        rebootBtn.disabled = true;
+                        rebootBtn.style.cursor = 'not-allowed';
                     }}
                 }} else {{
                     progressStatus.textContent = 'No firmware download in progress';
@@ -902,6 +910,7 @@ def index():
                     progressText.style.display = 'none';
                     rebootBtn.style.opacity = '0.5';
                     rebootBtn.disabled = true;
+                    rebootBtn.style.cursor = 'not-allowed';
                 }}
             }}
 
@@ -1319,6 +1328,59 @@ def index():
                 }}
             }}
 
+            function fetchFOTAProgress() {{
+                const deviceId = document.getElementById('deploy_device_id').value || 'bitbots-ecoWatt';
+                
+                fetch(`/api/fota-status/${{deviceId}}`)
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.status === 'active' && data.progress) {{
+                            const progress = data.progress;
+                            
+                            // Calculate progress based on acknowledged chunks
+                            const acknowledged_chunks = progress.current_chunk;
+                            const total_chunks = progress.total_chunks;
+                            const percentage = Math.round(progress.percentage);
+                            
+                            // Format bytes nicely
+                            const formatBytes = (bytes) => {{
+                                if (bytes === 0) return '0 B';
+                                const k = 1024;
+                                const sizes = ['B', 'KB', 'MB'];
+                                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                                return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+                            }};
+                            
+                            // Check if download is 100% complete and verified
+                            const isComplete = (
+                                percentage >= 100 && 
+                                data.session && 
+                                data.session.status === 'completed' && 
+                                data.session.last_ack_verified === true
+                            );
+                            
+                            updateProgressDisplay({{
+                                status: `Downloading firmware... (${{acknowledged_chunks}}/${{total_chunks}} chunks)`,
+                                percentage: percentage,
+                                downloaded: formatBytes(progress.bytes_downloaded),
+                                total: formatBytes(progress.total_bytes),
+                                completed: isComplete
+                            }});
+                        }} else if (data.status === 'queued') {{
+                            updateProgressDisplay({{
+                                status: 'Firmware update queued, waiting for device to connect...',
+                                percentage: 0,
+                                completed: false
+                            }});
+                        }} else if (data.status === 'none') {{
+                            updateProgressDisplay(null);
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error fetching FOTA progress:', error);
+                    }});
+            }}
+
             function openTab(evt, tabName) {{
                 // Hide all tab contents
                 var tabContents = document.getElementsByClassName("tab-content");
@@ -1343,6 +1405,9 @@ def index():
                     
                 fetch('/api/logs')
                     .then(r => r.json()).then(updateLogs).catch(console.error);
+                    
+                // Add FOTA progress polling
+                fetchFOTAProgress();
             }}
             fetchLatestData();
             setInterval(fetchLatestData, 2000);
@@ -1704,7 +1769,7 @@ def get_logs():
 
 @app.route("/api/fota-status/<device_id>", methods=["GET"])
 def get_fota_status(device_id):
-    """Get FOTA session status for a specific device"""
+    """Get FOTA session status for a specific device with accurate progress"""
     try:
         # Check for pending FOTA update
         if device_id in PENDING_FOTA_UPDATES:
@@ -1716,19 +1781,43 @@ def get_fota_status(device_id):
         # Check for active FOTA session
         if device_id in FOTA_SESSIONS:
             session = FOTA_SESSIONS[device_id]
-            progress_percentage = 0
-            if session["manifest"]["total_chunks"] > 0:
-                progress_percentage = (session.get("last_ack_chunk", -1) + 1) / session["manifest"]["total_chunks"] * 100
+            
+            # Calculate progress based on last acknowledged chunk
+            last_ack_chunk = session.get("last_ack_chunk", -1)
+            total_chunks = session["manifest"]["total_chunks"]
+            
+            # Progress is based on successfully acknowledged chunks
+            acknowledged_chunks = last_ack_chunk + 1 if last_ack_chunk >= 0 else 0
+            progress_percentage = (acknowledged_chunks / total_chunks * 100) if total_chunks > 0 else 0
+            
+            # Calculate bytes downloaded based on acknowledged chunks
+            chunk_size = session["manifest"]["chunk_size"]
+            total_bytes = session["manifest"]["size"]
+            bytes_downloaded = acknowledged_chunks * chunk_size
+            
+            # Don't exceed total file size
+            if bytes_downloaded > total_bytes:
+                bytes_downloaded = total_bytes
+            
+            # Check if download is completely verified (all chunks acknowledged and verified)
+            is_verified_complete = (
+                acknowledged_chunks >= total_chunks and 
+                session.get("last_ack_verified", False) and
+                session.get("status") == "completed"
+            )
             
             return jsonify({
                 "status": "active",
                 "session": session,
                 "progress": {
-                    "current_chunk": session.get("last_ack_chunk", -1) + 1,
-                    "total_chunks": session["manifest"]["total_chunks"],
+                    "current_chunk": acknowledged_chunks,
+                    "total_chunks": total_chunks,
                     "percentage": min(progress_percentage, 100),
-                    "bytes_downloaded": (session.get("last_ack_chunk", -1) + 1) * session["manifest"]["chunk_size"],
-                    "total_bytes": session["manifest"]["size"]
+                    "bytes_downloaded": bytes_downloaded,
+                    "total_bytes": total_bytes,
+                    "last_ack_chunk": last_ack_chunk,
+                    "last_ack_verified": session.get("last_ack_verified", False),
+                    "verified_complete": is_verified_complete
                 }
             })
         
@@ -1931,33 +2020,63 @@ def handle_config():
                     session["last_ack_verified"] = verified
                     session["last_ack_time"] = datetime.now(SRI_LANKA_TZ).isoformat()
                     
-                    print(f"[FOTA] Device {device_id} acknowledged chunk {chunk_received}, verified: {verified}")
+                    # Calculate progress for logging
+                    total_chunks = session["manifest"]["total_chunks"]
+                    acknowledged_chunks = chunk_received + 1
+                    progress_pct = (acknowledged_chunks / total_chunks * 100) if total_chunks > 0 else 0
+                    
+                    print(f"[FOTA] Device {device_id} acknowledged chunk {chunk_received}/{total_chunks-1} ({progress_pct:.1f}%), verified: {verified}")
                     
                     # If verification failed, mark for retransmission
                     if not verified:
                         session["retry_chunk"] = chunk_received
                         print(f"[FOTA] Chunk {chunk_received} verification failed, marking for retry")
+                        
+                        # Log verification failure (in progress status)
+                        download_log_entry = {
+                            "device_id": device_id,
+                            "download_data": {
+                                "status": "in_progress",
+                                "firmware_version": session["firmware_version"],
+                                "file_size": session["manifest"]["size"],
+                                "checksum_verified": False,
+                                "progress_percentage": progress_pct,
+                                "error_message": f"Chunk {chunk_received} verification failed"
+                            },
+                            "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+                        }
+                        FIRMWARE_DOWNLOAD_LOGS.append(download_log_entry)
                     else:
-                        # Update progress
+                        # Update progress - move to next chunk
                         session["current_chunk"] = chunk_received + 1
                         
-                        # Check if download is complete
-                        if chunk_received >= session["manifest"]["total_chunks"] - 1:
+                        # Check if ALL chunks are downloaded and verified (100% complete)
+                        if acknowledged_chunks >= total_chunks:
                             session["status"] = "completed"
-                            print(f"[FOTA] Download completed for device {device_id}")
+                            print(f"[FOTA] Download 100% completed for device {device_id} - All {total_chunks} chunks verified")
                             
-                            # Log successful download
+                            # NOW log successful download completion to verification logs
+                            # This only happens when 100% complete
                             download_log_entry = {
                                 "device_id": device_id,
                                 "download_data": {
                                     "status": "success",
                                     "firmware_version": session["firmware_version"],
                                     "file_size": session["manifest"]["size"],
-                                    "checksum_verified": True
+                                    "checksum_verified": True,
+                                    "progress_percentage": 100,
+                                    "chunks_completed": total_chunks,
+                                    "total_chunks": total_chunks,
+                                    "download_completed_at": datetime.now(SRI_LANKA_TZ).isoformat()
                                 },
                                 "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
                             }
                             FIRMWARE_DOWNLOAD_LOGS.append(download_log_entry)
+                            print(f"[FOTA] Added verification log entry for completed download")
+                        else:
+                            # Still in progress - only log major milestones to avoid log spam
+                            if acknowledged_chunks % 50 == 0 or acknowledged_chunks >= total_chunks - 5:
+                                print(f"[FOTA] Progress milestone: {acknowledged_chunks}/{total_chunks} chunks ({progress_pct:.1f}%)")
 
         # Prepare response with any pending configuration or commands
         response = {}
