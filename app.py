@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import base64
 import json
+from werkzeug.utils import secure_filename
 
 # Sri Lanka timezone (GMT+5:30)
 SRI_LANKA_TZ = timezone(timedelta(hours=5, minutes=30))
@@ -390,8 +391,20 @@ def index():
             <div id="firmware-update-tab" class="tab-content">
                 <div class="cards">
                     <div class="card">
-                        <h3>Firmware Update</h3>
-                        <p>Firmware update functionality will be implemented here.</p>
+                        <h3>Upload Firmware</h3>
+                        <form id="firmwareUploadForm" onsubmit="submitFirmwareForm(event)" enctype="multipart/form-data">
+                            <label for="firmware_version">Firmware Version:</label><br>
+                            <input type="text" id="firmware_version" name="firmware_version" placeholder="e.g., 1.2.3" required><br><br>
+                            
+                            <label for="firmware_file">Select .bin File:</label><br>
+                            <input type="file" id="firmware_file" name="firmware_file" accept=".bin" required><br><br>
+                            
+                            <input type="submit" value="Upload Firmware">
+                        </form>
+                    </div>
+                    <div class="card">
+                        <h3>Firmware Management</h3>
+                        <p>Additional firmware management features will be available here.</p>
                     </div>
                 </div>
             </div>
@@ -465,6 +478,16 @@ def index():
                             <div><strong>Action:</strong> ${{data.command.action}}</div>
                             <div><strong>Target Register:</strong> ${{data.command.target_register}}</div>
                             <div><strong>Value:</strong> ${{data.command.value}}</div>
+                        </div>
+                    `;
+                }} else if (data && data.firmware) {{
+                    // Format firmware upload data nicely
+                    content += `
+                        <div style="margin-bottom: 8px;"><strong>✅ Firmware Uploaded Successfully!</strong></div>
+                        <div style="font-size: 13px; line-height: 1.4;">
+                            <div><strong>Version:</strong> ${{data.firmware.version}}</div>
+                            <div><strong>Filename:</strong> ${{data.firmware.filename}}</div>
+                            <div><strong>Location:</strong> firmware_files/ folder</div>
                         </div>
                     `;
                 }} else {{
@@ -581,6 +604,42 @@ def index():
                 }})
                 .catch(error => {{
                     showPopup('Error submitting command: ' + error.message, false);
+                }});
+            }}
+
+            function submitFirmwareForm(event) {{
+                event.preventDefault();
+                
+                const form = document.getElementById('firmwareUploadForm');
+                const formData = new FormData(form);
+                
+                // Show loading message
+                showPopup('Uploading firmware...', true);
+                
+                fetch('/upload-firmware', {{
+                    method: 'POST',
+                    body: formData
+                }})
+                .then(response => response.json())
+                .then(result => {{
+                    if (result.success) {{
+                        // Create structured data for popup
+                        const popupData = {{
+                            firmware: {{
+                                version: result.version,
+                                filename: result.filename,
+                                message: result.message
+                            }}
+                        }};
+                        showPopup('', true, popupData);
+                        // Reset the form
+                        form.reset();
+                    }} else {{
+                        showPopup(result.message, false);
+                    }}
+                }})
+                .catch(error => {{
+                    showPopup('Error uploading firmware: ' + error.message, false);
                 }});
             }}
 
@@ -865,6 +924,50 @@ def queue_command_from_form():
         if request.content_type == 'application/json':
             return jsonify({"success": False, "message": str(e)}), 500
         return f"Error: {str(e)}", 500
+
+
+@app.route("/upload-firmware", methods=["POST"])
+def upload_firmware():
+    try:
+        # Check if firmware version is provided
+        firmware_version = request.form.get('firmware_version')
+        if not firmware_version:
+            return jsonify({"success": False, "message": "Firmware version is required"}), 400
+
+        # Check if file is provided
+        if 'firmware_file' not in request.files:
+            return jsonify({"success": False, "message": "No file selected"}), 400
+        
+        file = request.files['firmware_file']
+        if file.filename == '':
+            return jsonify({"success": False, "message": "No file selected"}), 400
+
+        # Check if file has .bin extension
+        if not file.filename.lower().endswith('.bin'):
+            return jsonify({"success": False, "message": "Only .bin files are allowed"}), 400
+
+        # Create firmware_files directory if it doesn't exist
+        firmware_dir = os.path.join(os.getcwd(), 'firmware_files')
+        os.makedirs(firmware_dir, exist_ok=True)
+
+        # Secure the filename and create a unique name with version
+        original_filename = secure_filename(file.filename)
+        # Create filename with version: version_originalname.bin
+        filename = f"{firmware_version}_{original_filename}"
+        filepath = os.path.join(firmware_dir, filename)
+
+        # Save the file
+        file.save(filepath)
+
+        return jsonify({
+            "success": True, 
+            "message": f"Firmware version {firmware_version} uploaded successfully",
+            "filename": filename,
+            "version": firmware_version
+        })
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Upload failed: {str(e)}"}), 500
 
 
 @app.route("/upload", methods=["POST"])
