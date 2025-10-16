@@ -2006,14 +2006,53 @@ def handle_config():
 
         # Handle FOTA acknowledgment from device
         if "fota_status" in data:
-            print(f"[FOTA] Processing FOTA acknowledgment: {data['fota_status']}")
+            print(f"\n[FOTA] ===== PROCESSING FOTA ACKNOWLEDGMENT =====")
+            print(f"[FOTA] Raw fota_status: {data['fota_status']}")
             fota_status = data["fota_status"]
+            
+            # Debug current session state
+            if device_id in FOTA_SESSIONS:
+                session = FOTA_SESSIONS[device_id]
+                print(f"[FOTA DEBUG] BEFORE processing:")
+                print(f"[FOTA DEBUG] - Session status: {session['status']}")
+                print(f"[FOTA DEBUG] - Current chunk: {session.get('current_chunk', 0)}")
+                print(f"[FOTA DEBUG] - Last ack chunk: {session.get('last_ack_chunk', -1)}")
+            else:
+                print(f"[FOTA DEBUG] ERROR: No active session found for device {device_id}")
             
             # Update FOTA session with acknowledgment
             if device_id in FOTA_SESSIONS:
                 session = FOTA_SESSIONS[device_id]
+                
+                # Check for manifest acknowledgment
+                manifest_ack = fota_status.get("manifest_ack", False)
+                if manifest_ack and session["status"] == "manifest_sent":
+                    session["manifest_acknowledged"] = True
+                    session["status"] = "active"
+                    print(f"[FOTA] Device {device_id} acknowledged manifest, starting chunk delivery")
+                    return jsonify({})  # Send empty response, chunks will start on next request
+                
+                # Handle standard format: {"chunk_received": 0, "verified": true}
                 chunk_received = fota_status.get("chunk_received")
                 verified = fota_status.get("verified", False)
+                
+                # Handle ESP format: {"chunk_0_ack": true, "chunk_1_ack": true, etc.}
+                if chunk_received is None:
+                    print(f"[FOTA DEBUG] Standard format not found, checking ESP format in: {fota_status}")
+                    # Look for chunk_X_ack format
+                    for key, value in fota_status.items():
+                        print(f"[FOTA DEBUG] Checking key: {key} = {value}")
+                        if key.startswith("chunk_") and key.endswith("_ack") and value is True:
+                            # Extract chunk number from "chunk_X_ack"
+                            try:
+                                chunk_num_str = key.replace("chunk_", "").replace("_ack", "")
+                                chunk_received = int(chunk_num_str)
+                                verified = True  # If ESP sent ack, assume verification passed
+                                print(f"[FOTA] Detected ESP format acknowledgment: {key} = {value} -> chunk {chunk_received}")
+                                break
+                            except ValueError:
+                                print(f"[FOTA DEBUG] Failed to parse chunk number from {key}")
+                                continue
                 
                 if chunk_received is not None:
                     session["last_ack_chunk"] = chunk_received
@@ -2049,6 +2088,8 @@ def handle_config():
                     else:
                         # Update progress - move to next chunk
                         session["current_chunk"] = chunk_received + 1
+                        print(f"[FOTA] Chunk {chunk_received} verified successfully, advancing to chunk {session['current_chunk']}")
+                        print(f"[FOTA DEBUG] Session state after advance: current_chunk={session['current_chunk']}, last_ack_chunk={session['last_ack_chunk']}")
                         
                         # Check if ALL chunks are downloaded and verified (100% complete)
                         if acknowledged_chunks >= total_chunks:
@@ -2077,6 +2118,15 @@ def handle_config():
                             # Still in progress - only log major milestones to avoid log spam
                             if acknowledged_chunks % 50 == 0 or acknowledged_chunks >= total_chunks - 5:
                                 print(f"[FOTA] Progress milestone: {acknowledged_chunks}/{total_chunks} chunks ({progress_pct:.1f}%)")
+                    
+                    print(f"[FOTA DEBUG] AFTER processing:")
+                    print(f"[FOTA DEBUG] - Session status: {session['status']}")
+                    print(f"[FOTA DEBUG] - Current chunk: {session.get('current_chunk', 0)}")
+                    print(f"[FOTA DEBUG] - Last ack chunk: {session.get('last_ack_chunk', -1)}")
+                    
+                    # DON'T return here - continue to send next chunk in same response
+                    print(f"[FOTA] Chunk ACK processed, will send next chunk in same response")
+                    # Fall through to chunk sending logic below
 
         # Prepare response with any pending configuration or commands
         response = {}
@@ -2093,49 +2143,27 @@ def handle_config():
             response["command"] = command
             print(f"[CONFIG DEBUG] Sending pending command to device {device_id}: {command}")
 
-        # Check for pending FOTA update
-        if device_id in PENDING_FOTA_UPDATES:
-            fota_update = PENDING_FOTA_UPDATES[device_id]
-            
-            # Check if there's an active session or start new one
-            if device_id not in FOTA_SESSIONS:
-                # Start new FOTA session
-                session = {
-                    "device_id": device_id,
-                    "firmware_version": fota_update["firmware_version"],
-                    "firmware_info": fota_update["firmware_info"],
-                    "manifest": fota_update["manifest"],
-                    "current_chunk": 0,
-                    "status": "active",
-                    "started_at": datetime.now(SRI_LANKA_TZ).isoformat(),
-                    "last_ack_chunk": -1,
-                    "last_ack_verified": False,
-                    "retry_chunk": None
-                }
-                FOTA_SESSIONS[device_id] = session
-                
-                # Send manifest to device
-                response["fota"] = {
-                    "manifest": fota_update["manifest"],
-                    "next_chunk": 0
-                }
-                print(f"[FOTA] Starting FOTA session for device {device_id}, sending manifest")
-                
-                # Remove from pending updates since session is now active
-                PENDING_FOTA_UPDATES.pop(device_id)
-                
-        # Handle ongoing FOTA session - send next chunk
-        elif device_id in FOTA_SESSIONS:
+        # Handle FOTA updates and sessions
+        # Check if device has active FOTA session first (higher priority)
+        if device_id in FOTA_SESSIONS:
             session = FOTA_SESSIONS[device_id]
             
-            if session["status"] == "active":
+            if session["status"] == "manifest_sent":
+                # Still waiting for manifest acknowledgment
+                print(f"[FOTA] Device {device_id} made request but manifest not yet acknowledged")
+                # Don't send anything, wait for manifest ack
+                
+            elif session["status"] == "active":
+                print(f"[FOTA DEBUG] Session active - current_chunk: {session.get('current_chunk', 0)}, retry_chunk: {session.get('retry_chunk', 'None')}")
                 # Determine which chunk to send
                 chunk_to_send = session.get("retry_chunk")
                 if chunk_to_send is None:
                     chunk_to_send = session["current_chunk"]
+                    print(f"[FOTA DEBUG] No retry needed, sending current chunk: {chunk_to_send}")
                 else:
                     # Clear retry flag
                     session["retry_chunk"] = None
+                    print(f"[FOTA DEBUG] Retrying failed chunk: {chunk_to_send}")
                 
                 # Check if we still have chunks to send
                 if chunk_to_send < session["manifest"]["total_chunks"]:
@@ -2147,14 +2175,19 @@ def handle_config():
                     )
                     
                     if chunk_data:
-                        # Calculate HMAC for chunk
+                        # Calculate HMAC on base64-encoded payload
                         device_psk = DEVICE_PSKS.get(device_id)
                         if device_psk:
                             chunk_mac = hmac.new(
-                                bytes.fromhex(device_psk),
-                                chunk_data.encode('utf-8'),
+                                device_psk.encode('utf-8'),
+                                chunk_data.encode('utf-8'),  # Use base64-encoded payload for MAC
                                 hashlib.sha256
                             ).hexdigest()
+                            
+                            print(f"[FOTA DEBUG] Chunk {chunk_to_send} MAC calculation:")
+                            print(f"[FOTA DEBUG] - Base64 payload length: {len(chunk_data)} chars")
+                            print(f"[FOTA DEBUG] - PSK: {device_psk[:8]}...{device_psk[-8:]}")
+                            print(f"[FOTA DEBUG] - Calculated MAC: {chunk_mac[:16]}...{chunk_mac[-16:]}")
                         else:
                             chunk_mac = "no_psk"
                         
@@ -2169,10 +2202,40 @@ def handle_config():
                     else:
                         print(f"[FOTA] Error reading chunk {chunk_to_send} for device {device_id}")
                         
-            elif session["status"] == "completed":
-                # Clean up completed session
-                FOTA_SESSIONS.pop(device_id)
-                print(f"[FOTA] Cleaned up completed session for device {device_id}")
+                elif session["status"] == "completed":
+                    # Clean up completed session
+                    FOTA_SESSIONS.pop(device_id)
+                    print(f"[FOTA] Cleaned up completed session for device {device_id}")
+                    
+        # Check for pending FOTA update (only if no active session)
+        elif device_id in PENDING_FOTA_UPDATES:
+            fota_update = PENDING_FOTA_UPDATES[device_id]
+            
+            # Start new FOTA session
+            session = {
+                "device_id": device_id,
+                "firmware_version": fota_update["firmware_version"],
+                "firmware_info": fota_update["firmware_info"],
+                "manifest": fota_update["manifest"],
+                "current_chunk": 0,
+                "status": "manifest_sent",  # Wait for manifest acknowledgment
+                "started_at": datetime.now(SRI_LANKA_TZ).isoformat(),
+                "last_ack_chunk": -1,
+                "last_ack_verified": False,
+                "retry_chunk": None,
+                "manifest_acknowledged": False
+            }
+            FOTA_SESSIONS[device_id] = session
+            
+            # Send manifest to device
+            response["fota"] = {
+                "manifest": fota_update["manifest"],
+                "next_chunk": 0
+            }
+            print(f"[FOTA] Starting FOTA session for device {device_id}, sending manifest and waiting for acknowledgment")
+            
+            # Remove from pending updates since session is now active
+            PENDING_FOTA_UPDATES.pop(device_id)
 
         print(f"[CONFIG DEBUG] Sending response: {response}")
         print(f"[CONFIG DEBUG] ===== CONFIG REQUEST COMPLETE =====\n")
