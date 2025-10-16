@@ -239,13 +239,57 @@ def index():
             .popup-notification li {{
                 margin: 2px 0;
             }}
+            /* Tab Navigation Styles */
+            .tab-navigation {{
+                background-color: #f8f9fa;
+                border-bottom: 2px solid #e9ecef;
+                padding: 0;
+                margin: 0;
+                display: flex;
+            }}
+            .tab-button {{
+                background-color: transparent;
+                border: none;
+                padding: 16px 24px;
+                cursor: pointer;
+                font-size: 16px;
+                font-weight: 500;
+                color: #495057;
+                border-bottom: 3px solid transparent;
+                transition: all 0.3s ease;
+            }}
+            .tab-button:hover {{
+                background-color: #e9ecef;
+                color: var(--accent);
+            }}
+            .tab-button.active {{
+                color: var(--accent);
+                border-bottom-color: var(--accent);
+                background-color: #ffffff;
+            }}
+            /* Tab Content Styles */
+            .tab-content {{
+                display: none;
+            }}
+            .tab-content.active {{
+                display: block;
+            }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🔋 EcoWatt Cloud - Device Data Monitor</h1>
         </div>
+        
+        <!-- Tab Navigation -->
+        <div class="tab-navigation">
+            <button class="tab-button active" onclick="openTab(event, 'device-config-tab')">Device Configurations</button>
+            <button class="tab-button" onclick="openTab(event, 'firmware-update-tab')">Firmware Update</button>
+        </div>
+        
         <div class="container">
+            <!-- Device Configurations Tab Content -->
+            <div id="device-config-tab" class="tab-content active">
             <div class="cards">
                 <div class="card">
                     <h3>Set Device Configuration</h3>
@@ -338,6 +382,17 @@ def index():
                 <h3>Command Execution Logs</h3>
                 <div id="commandLogsContent">
                     <div class="muted">No command execution results received yet.</div>
+                </div>
+            </div>
+            </div>
+            
+            <!-- Firmware Update Tab Content -->
+            <div id="firmware-update-tab" class="tab-content">
+                <div class="cards">
+                    <div class="card">
+                        <h3>Firmware Update</h3>
+                        <p>Firmware update functionality will be implemented here.</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -669,6 +724,24 @@ def index():
                 }} else {{
                     commandLogsContent.innerHTML = '<div class="muted">No command execution results received yet.</div>';
                 }}
+            }}
+
+            function openTab(evt, tabName) {{
+                // Hide all tab contents
+                var tabContents = document.getElementsByClassName("tab-content");
+                for (var i = 0; i < tabContents.length; i++) {{
+                    tabContents[i].classList.remove("active");
+                }}
+
+                // Remove active class from all tab buttons
+                var tabButtons = document.getElementsByClassName("tab-button");
+                for (var i = 0; i < tabButtons.length; i++) {{
+                    tabButtons[i].classList.remove("active");
+                }}
+
+                // Show the selected tab content and mark button as active
+                document.getElementById(tabName).classList.add("active");
+                evt.currentTarget.classList.add("active");
             }}
 
             function fetchLatestData() {{
