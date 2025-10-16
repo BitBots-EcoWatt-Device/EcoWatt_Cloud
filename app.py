@@ -523,24 +523,7 @@ def index():
                                     <div id="progressBarFill" style="width: 0%; height: 20px; background-color: var(--accent); border-radius: 4px; transition: width 0.3s ease;"></div>
                                 </div>
                                 <div id="progressText" style="font-size: 12px; color: #666; display: none;">0% (0 / 0 bytes)</div>
-                            </div>
-                        </div>
-                        
-                        <div id="rebootSection" style="margin-top: 16px;">
-                            <button id="rebootDeviceBtn" onclick="rebootDevice()" style="background-color: #e74c3c; color: white; padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; opacity: 0.5;" disabled>
-                                Reboot Device
-                            </button>
-                            <div style="font-size: 12px; color: #7f8c8d; margin-top: 4px;">Apply firmware update after download completion</div>
-                        </div>
-                        
-                        <div id="rebootProgress" style="margin-top: 20px;">
-                            <h4>Reboot Progress</h4>
-                            <div id="rebootProgressContainer" style="background-color: #f0f0f0; border-radius: 8px; padding: 16px; margin: 8px 0;">
-                                <div id="rebootProgressStatus" style="color: #7f8c8d; font-style: italic;">No reboot in progress</div>
-                                <div id="rebootProgressBar" style="width: 100%; background-color: #e0e0e0; border-radius: 4px; margin: 8px 0; display: none;">
-                                    <div id="rebootProgressBarFill" style="width: 0%; height: 20px; background-color: #e74c3c; border-radius: 4px; transition: width 0.3s ease;"></div>
-                                </div>
-                                <div id="rebootProgressText" style="font-size: 12px; color: #666; display: none;">Rebooting device...</div>
+                                <div id="autoRestartNotice" style="margin-top: 12px; color: #27ae60; font-weight: 600; display: none;">Download complete. Your device will restart automatically.</div>
                             </div>
                         </div>
                     </div>
@@ -873,7 +856,11 @@ def index():
                 const progressBar = document.getElementById('progressBar');
                 const progressBarFill = document.getElementById('progressBarFill');
                 const progressText = document.getElementById('progressText');
-                const rebootBtn = document.getElementById('rebootDeviceBtn');
+                const autoRestartNotice = document.getElementById('autoRestartNotice');
+
+                if (autoRestartNotice) {{
+                    autoRestartNotice.style.display = 'none';
+                }}
 
                 if (progress && progress.status) {{
                     progressStatus.textContent = progress.status;
@@ -887,20 +874,13 @@ def index():
                         progressText.textContent = `${{progress.percentage}}% (${{progress.downloaded || '0 B'}} / ${{progress.total || '0 B'}})`;
                     }}
 
-                    // Enable reboot button ONLY when download is 100% complete AND verified
                     if (progress.completed && progress.percentage >= 100) {{
-                        progressStatus.textContent = '✅ Download completed successfully - Ready to apply firmware update';
+                        progressStatus.textContent = '✅ Download completed successfully';
                         progressStatus.style.color = '#27ae60';
                         progressBarFill.style.width = '100%';
-                        rebootBtn.style.opacity = '1';
-                        rebootBtn.disabled = false;
-                        rebootBtn.style.backgroundColor = '#e74c3c';
-                        rebootBtn.style.cursor = 'pointer';
-                    }} else {{
-                        // Keep reboot button disabled until 100% complete
-                        rebootBtn.style.opacity = '0.5';
-                        rebootBtn.disabled = true;
-                        rebootBtn.style.cursor = 'not-allowed';
+                        if (autoRestartNotice) {{
+                            autoRestartNotice.style.display = 'block';
+                        }}
                     }}
                 }} else {{
                     progressStatus.textContent = 'No firmware download in progress';
@@ -908,123 +888,6 @@ def index():
                     progressStatus.style.fontStyle = 'italic';
                     progressBar.style.display = 'none';
                     progressText.style.display = 'none';
-                    rebootBtn.style.opacity = '0.5';
-                    rebootBtn.disabled = true;
-                    rebootBtn.style.cursor = 'not-allowed';
-                }}
-            }}
-
-            function updateRebootProgressDisplay(progress) {{
-                const rebootProgressStatus = document.getElementById('rebootProgressStatus');
-                const rebootProgressBar = document.getElementById('rebootProgressBar');
-                const rebootProgressBarFill = document.getElementById('rebootProgressBarFill');
-                const rebootProgressText = document.getElementById('rebootProgressText');
-
-                if (progress && progress.status) {{
-                    rebootProgressStatus.textContent = progress.status;
-                    rebootProgressStatus.style.color = '#2c3e50';
-                    rebootProgressStatus.style.fontStyle = 'normal';
-
-                    if (progress.percentage !== undefined) {{
-                        rebootProgressBar.style.display = 'block';
-                        rebootProgressText.style.display = 'block';
-                        rebootProgressBarFill.style.width = progress.percentage + '%';
-                        rebootProgressText.textContent = progress.message || 'Rebooting device...';
-                    }}
-
-                    if (progress.completed) {{
-                        rebootProgressStatus.textContent = '✅ Device rebooted successfully';
-                        rebootProgressStatus.style.color = '#27ae60';
-                        // Reset after successful reboot
-                        setTimeout(() => {{
-                            updateRebootProgressDisplay(null);
-                        }}, 3000);
-                    }} else if (progress.failed) {{
-                        rebootProgressStatus.textContent = '❌ Reboot failed';
-                        rebootProgressStatus.style.color = '#e74c3c';
-                    }}
-                }} else {{
-                    rebootProgressStatus.textContent = 'No reboot in progress';
-                    rebootProgressStatus.style.color = '#7f8c8d';
-                    rebootProgressStatus.style.fontStyle = 'italic';
-                    rebootProgressBar.style.display = 'none';
-                    rebootProgressText.style.display = 'none';
-                }}
-            }}
-
-            function rebootDevice() {{
-                const deviceId = document.getElementById('deploy_device_id').value;
-                
-                if (confirm(`Are you sure you want to reboot device "${{deviceId}}" to apply the firmware update?`)) {{
-                    showPopup(`Reboot command sent to device "${{deviceId}}". Implementation coming soon.`, true);
-                    
-                    // Show reboot progress
-                    updateRebootProgressDisplay({{
-                        status: 'Sending reboot command to device...',
-                        percentage: 20,
-                        message: 'Initiating device reboot'
-                    }});
-                    
-                    // Simulate reboot progress (replace with actual implementation)
-                    setTimeout(() => {{
-                        updateRebootProgressDisplay({{
-                            status: 'Device is rebooting...',
-                            percentage: 60,
-                            message: 'Applying firmware update'
-                        }});
-                    }}, 2000);
-                    
-                    setTimeout(() => {{
-                        updateRebootProgressDisplay({{
-                            status: 'Waiting for device to come back online...',
-                            percentage: 90,
-                            message: 'Finalizing boot process'
-                        }});
-                    }}, 5000);
-                    
-                    setTimeout(() => {{
-                        updateRebootProgressDisplay({{
-                            status: 'Device rebooted successfully',
-                            percentage: 100,
-                            completed: true,
-                            message: 'Firmware update applied successfully'
-                        }});
-                        // Reset firmware download progress after successful reboot
-                        updateProgressDisplay(null);
-                    }}, 8000);
-                    
-                    // TODO: Implement actual device reboot
-                    // fetch('/reboot-device', {{
-                    //     method: 'POST',
-                    //     headers: {{
-                    //         'Content-Type': 'application/json',
-                    //     }},
-                    //     body: JSON.stringify({{
-                    //         device_id: deviceId
-                    //     }})
-                    // }})
-                    // .then(response => response.json())
-                    // .then(result => {{
-                    //     if (result.success) {{
-                    //         showPopup('Device reboot command sent successfully!', true);
-                    //         updateProgressDisplay(null);
-                    //         // Start monitoring reboot progress
-                    //         startRebootProgressMonitoring(deviceId);
-                    //     }} else {{
-                    //         showPopup(result.message, false);
-                    //         updateRebootProgressDisplay({{
-                    //             status: 'Reboot failed',
-                    //             failed: true
-                    //         }});
-                    //     }}
-                    // }})
-                    // .catch(error => {{
-                    //     showPopup('Error sending reboot command: ' + error.message, false);
-                    //     updateRebootProgressDisplay({{
-                    //         status: 'Reboot failed',
-                    //         failed: true
-                    //     }});
-                    // }});
                 }}
             }}
 
@@ -2003,6 +1866,16 @@ def handle_config():
                 "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
             }
             COMMAND_LOGS.append(result_log_entry)
+
+        # Handle firmware boot confirmation sent after device reboot
+        if "boot_data" in data:
+            boot_entry = {
+                "device_id": device_id,
+                "boot_data": data["boot_data"],
+                "received_at": datetime.now(SRI_LANKA_TZ).isoformat()
+            }
+            FIRMWARE_BOOT_LOGS.append(boot_entry)
+            print(f"[FOTA] Logged boot confirmation for device {device_id}: {data['boot_data']}")
 
         # Handle FOTA acknowledgment from device
         if "fota_status" in data:
