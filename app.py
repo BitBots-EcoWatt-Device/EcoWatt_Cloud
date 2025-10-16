@@ -403,8 +403,37 @@ def index():
                         </form>
                     </div>
                     <div class="card">
-                        <h3>Firmware Management</h3>
-                        <p>Additional firmware management features will be available here.</p>
+                        <h3>Deploy Firmware Update</h3>
+                        <form id="firmwareDeployForm" onsubmit="submitFirmwareDeployForm(event)">
+                            <label for="deploy_device_id">Device Name:</label><br>
+                            <input type="text" id="deploy_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
+                            
+                            <label for="firmware_version_select">Select Update Version:</label><br>
+                            <select id="firmware_version_select" name="firmware_version" required>
+                                <option value="">-- Select Version --</option>
+                                <!-- Options will be populated dynamically -->
+                            </select><br><br>
+                            
+                            <input type="submit" value="Queue Firmware Update">
+                        </form>
+                        
+                        <div id="firmwareProgress" style="margin-top: 20px;">
+                            <h4>Firmware Download Progress</h4>
+                            <div id="progressContainer" style="background-color: #f0f0f0; border-radius: 8px; padding: 16px; margin: 8px 0;">
+                                <div id="progressStatus" style="color: #7f8c8d; font-style: italic;">No firmware download in progress</div>
+                                <div id="progressBar" style="width: 100%; background-color: #e0e0e0; border-radius: 4px; margin: 8px 0; display: none;">
+                                    <div id="progressBarFill" style="width: 0%; height: 20px; background-color: var(--accent); border-radius: 4px; transition: width 0.3s ease;"></div>
+                                </div>
+                                <div id="progressText" style="font-size: 12px; color: #666; display: none;">0% (0 / 0 bytes)</div>
+                            </div>
+                        </div>
+                        
+                        <div id="rebootSection" style="margin-top: 16px;">
+                            <button id="rebootDeviceBtn" onclick="rebootDevice()" style="background-color: #e74c3c; color: white; padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; opacity: 0.5;" disabled>
+                                Reboot Device
+                            </button>
+                            <div style="font-size: 12px; color: #7f8c8d; margin-top: 4px;">Apply firmware update after download completion</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -643,6 +672,152 @@ def index():
                 }});
             }}
 
+            function submitFirmwareDeployForm(event) {{
+                event.preventDefault();
+                
+                const form = document.getElementById('firmwareDeployForm');
+                const formData = new FormData(form);
+                
+                const deviceId = formData.get('device_id');
+                const firmwareVersion = formData.get('firmware_version');
+                
+                // Show placeholder message for now
+                showPopup(`Firmware update queued for device "${{deviceId}}" with version "${{firmwareVersion}}". Implementation coming soon.`, true);
+                
+                // TODO: Implement actual firmware deployment queueing
+                // fetch('/queue-firmware-update', {{
+                //     method: 'POST',
+                //     headers: {{
+                //         'Content-Type': 'application/json',
+                //     }},
+                //     body: JSON.stringify({{
+                //         device_id: deviceId,
+                //         firmware_version: firmwareVersion
+                //     }})
+                // }})
+                // .then(response => response.json())
+                // .then(result => {{
+                //     if (result.success) {{
+                //         showPopup('Firmware update queued successfully!', true);
+                //         // Start monitoring progress
+                //         startProgressMonitoring(deviceId);
+                //     }} else {{
+                //         showPopup(result.message, false);
+                //     }}
+                // }})
+                // .catch(error => {{
+                //     showPopup('Error queueing firmware update: ' + error.message, false);
+                // }});
+            }}
+
+            function updateProgressDisplay(progress) {{
+                const progressStatus = document.getElementById('progressStatus');
+                const progressBar = document.getElementById('progressBar');
+                const progressBarFill = document.getElementById('progressBarFill');
+                const progressText = document.getElementById('progressText');
+                const rebootBtn = document.getElementById('rebootDeviceBtn');
+
+                if (progress && progress.status) {{
+                    progressStatus.textContent = progress.status;
+                    progressStatus.style.color = '#2c3e50';
+                    progressStatus.style.fontStyle = 'normal';
+
+                    if (progress.percentage !== undefined) {{
+                        progressBar.style.display = 'block';
+                        progressText.style.display = 'block';
+                        progressBarFill.style.width = progress.percentage + '%';
+                        progressText.textContent = `${{progress.percentage}}% (${{progress.downloaded || 0}} / ${{progress.total || 0}} bytes)`;
+                    }}
+
+                    if (progress.completed) {{
+                        progressStatus.textContent = '✅ Download completed successfully';
+                        progressStatus.style.color = '#27ae60';
+                        rebootBtn.style.opacity = '1';
+                        rebootBtn.disabled = false;
+                        rebootBtn.style.backgroundColor = '#e74c3c';
+                    }}
+                }} else {{
+                    progressStatus.textContent = 'No firmware download in progress';
+                    progressStatus.style.color = '#7f8c8d';
+                    progressStatus.style.fontStyle = 'italic';
+                    progressBar.style.display = 'none';
+                    progressText.style.display = 'none';
+                    rebootBtn.style.opacity = '0.5';
+                    rebootBtn.disabled = true;
+                }}
+            }}
+
+            function rebootDevice() {{
+                const deviceId = document.getElementById('deploy_device_id').value;
+                
+                if (confirm(`Are you sure you want to reboot device "${{deviceId}}" to apply the firmware update?`)) {{
+                    showPopup(`Reboot command sent to device "${{deviceId}}". Implementation coming soon.`, true);
+                    
+                    // Reset progress display after reboot
+                    setTimeout(() => {{
+                        updateProgressDisplay(null);
+                    }}, 2000);
+                    
+                    // TODO: Implement actual device reboot
+                    // fetch('/reboot-device', {{
+                    //     method: 'POST',
+                    //     headers: {{
+                    //         'Content-Type': 'application/json',
+                    //     }},
+                    //     body: JSON.stringify({{
+                    //         device_id: deviceId
+                    //     }})
+                    // }})
+                    // .then(response => response.json())
+                    // .then(result => {{
+                    //         if (result.success) {{
+                    //         showPopup('Device reboot command sent successfully!', true);
+                    //         updateProgressDisplay(null);
+                    //     }} else {{
+                    //         showPopup(result.message, false);
+                    //     }}
+                    // }})
+                    // .catch(error => {{
+                    //     showPopup('Error sending reboot command: ' + error.message, false);
+                    // }});
+                }}
+            }}
+
+            function loadAvailableFirmwareVersions() {{
+                // TODO: Fetch available firmware versions from backend
+                // For now, simulate with placeholder data
+                const versionSelect = document.getElementById('firmware_version_select');
+                
+                // Clear existing options except the first one
+                while (versionSelect.children.length > 1) {{
+                    versionSelect.removeChild(versionSelect.lastChild);
+                }}
+                
+                // Add placeholder versions (these would come from backend)
+                const placeholderVersions = ['1.0.0', '1.1.0', '1.2.0'];
+                placeholderVersions.forEach(version => {{
+                    const option = document.createElement('option');
+                    option.value = version;
+                    option.textContent = `Version ${{version}}`;
+                    versionSelect.appendChild(option);
+                }});
+                
+                // TODO: Replace with actual backend call
+                // fetch('/api/firmware-versions')
+                //     .then(response => response.json())
+                //     .then(versions => {{
+                //         versions.forEach(version => {{
+                //             const option = document.createElement('option');
+                //             option.value = version.version;
+                //             option.textContent = `Version ${{version.version}} (${{version.filename}})`;
+                //             versionSelect.appendChild(option);
+                //         }});
+                //     }})
+                //     .catch(error => {{
+                //         console.error('Error loading firmware versions:', error);
+                //     }});
+            }}
+
             function updateTable(data) {{
                 const tableContent = document.getElementById('tableContent');
                 const totalReports = document.getElementById('totalReports');
@@ -812,6 +987,9 @@ def index():
             }}
             fetchLatestData();
             setInterval(fetchLatestData, 2000);
+            
+            // Load available firmware versions on page load
+            loadAvailableFirmwareVersions();
         </script>
     </body>
     </html>
