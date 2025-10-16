@@ -85,6 +85,10 @@ COMMAND_LOGS = []
 # NEW: Store uploaded firmware information
 UPLOADED_FIRMWARE = []  # List of {version, filename, filepath, uploaded_at}
 
+# NEW: Store firmware update logs from devices
+FIRMWARE_DOWNLOAD_LOGS = []  # Device download verification logs
+FIRMWARE_BOOT_LOGS = []      # Device boot confirmation logs
+
 # Stores the PSK for each known device.
 DEVICE_PSKS = {
     "bitbots-ecoWatt": "E5A3C8B2F0D9E8A1C5B3A2D8F0E9C4B2A1D8E5C3B0A9F8E2D1C0B7A6F5E4D3C2"
@@ -391,7 +395,7 @@ def index():
                     </form>
                 </div>
                 <div class="card">
-                    <h3>Queue Inverter Command</h3>
+                    <h3>Give Inverter Command</h3>
                     <form id="commandForm" onsubmit="submitCommandForm(event)">
                         <label for="cmd_device_id">Device ID:</label><br>
                         <input type="text" id="cmd_device_id" name="device_id" value="bitbots-ecoWatt" required><br><br>
@@ -411,7 +415,7 @@ def index():
                 <div class="card"><div><strong>Last Update</strong></div><div id="lastUpdate">Never</div></div>
             </div>
             <div class="table-container">
-                <h3>Latest Device Compression Reports</h3>
+                <h3>Inverter Status Reports</h3>
                 <div id="tableContent"><div class="muted">Waiting for device data... Send JSON to POST /upload</div></div>
             </div>
             
@@ -479,6 +483,33 @@ def index():
                             </button>
                             <div style="font-size: 12px; color: #7f8c8d; margin-top: 4px;">Apply firmware update after download completion</div>
                         </div>
+                        
+                        <div id="rebootProgress" style="margin-top: 20px;">
+                            <h4>Reboot Progress</h4>
+                            <div id="rebootProgressContainer" style="background-color: #f0f0f0; border-radius: 8px; padding: 16px; margin: 8px 0;">
+                                <div id="rebootProgressStatus" style="color: #7f8c8d; font-style: italic;">No reboot in progress</div>
+                                <div id="rebootProgressBar" style="width: 100%; background-color: #e0e0e0; border-radius: 4px; margin: 8px 0; display: none;">
+                                    <div id="rebootProgressBarFill" style="width: 0%; height: 20px; background-color: #e74c3c; border-radius: 4px; transition: width 0.3s ease;"></div>
+                                </div>
+                                <div id="rebootProgressText" style="font-size: 12px; color: #666; display: none;">Rebooting device...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Firmware Download Verification Logs -->
+                <div class="table-container">
+                    <h3>Firmware Download Verification Logs</h3>
+                    <div id="firmwareDownloadLogsContent">
+                        <div class="muted">No firmware download verifications received yet.</div>
+                    </div>
+                </div>
+                
+                <!-- Firmware Boot Confirmation Logs -->
+                <div class="table-container">
+                    <h3>Firmware Boot Confirmation Logs</h3>
+                    <div id="firmwareBootLogsContent">
+                        <div class="muted">No firmware boot confirmations received yet.</div>
                     </div>
                 </div>
             </div>
@@ -794,16 +825,84 @@ def index():
                 }}
             }}
 
+            function updateRebootProgressDisplay(progress) {{
+                const rebootProgressStatus = document.getElementById('rebootProgressStatus');
+                const rebootProgressBar = document.getElementById('rebootProgressBar');
+                const rebootProgressBarFill = document.getElementById('rebootProgressBarFill');
+                const rebootProgressText = document.getElementById('rebootProgressText');
+
+                if (progress && progress.status) {{
+                    rebootProgressStatus.textContent = progress.status;
+                    rebootProgressStatus.style.color = '#2c3e50';
+                    rebootProgressStatus.style.fontStyle = 'normal';
+
+                    if (progress.percentage !== undefined) {{
+                        rebootProgressBar.style.display = 'block';
+                        rebootProgressText.style.display = 'block';
+                        rebootProgressBarFill.style.width = progress.percentage + '%';
+                        rebootProgressText.textContent = progress.message || 'Rebooting device...';
+                    }}
+
+                    if (progress.completed) {{
+                        rebootProgressStatus.textContent = '✅ Device rebooted successfully';
+                        rebootProgressStatus.style.color = '#27ae60';
+                        // Reset after successful reboot
+                        setTimeout(() => {{
+                            updateRebootProgressDisplay(null);
+                        }}, 3000);
+                    }} else if (progress.failed) {{
+                        rebootProgressStatus.textContent = '❌ Reboot failed';
+                        rebootProgressStatus.style.color = '#e74c3c';
+                    }}
+                }} else {{
+                    rebootProgressStatus.textContent = 'No reboot in progress';
+                    rebootProgressStatus.style.color = '#7f8c8d';
+                    rebootProgressStatus.style.fontStyle = 'italic';
+                    rebootProgressBar.style.display = 'none';
+                    rebootProgressText.style.display = 'none';
+                }}
+            }}
+
             function rebootDevice() {{
                 const deviceId = document.getElementById('deploy_device_id').value;
                 
                 if (confirm(`Are you sure you want to reboot device "${{deviceId}}" to apply the firmware update?`)) {{
                     showPopup(`Reboot command sent to device "${{deviceId}}". Implementation coming soon.`, true);
                     
-                    // Reset progress display after reboot
+                    // Show reboot progress
+                    updateRebootProgressDisplay({{
+                        status: 'Sending reboot command to device...',
+                        percentage: 20,
+                        message: 'Initiating device reboot'
+                    }});
+                    
+                    // Simulate reboot progress (replace with actual implementation)
                     setTimeout(() => {{
-                        updateProgressDisplay(null);
+                        updateRebootProgressDisplay({{
+                            status: 'Device is rebooting...',
+                            percentage: 60,
+                            message: 'Applying firmware update'
+                        }});
                     }}, 2000);
+                    
+                    setTimeout(() => {{
+                        updateRebootProgressDisplay({{
+                            status: 'Waiting for device to come back online...',
+                            percentage: 90,
+                            message: 'Finalizing boot process'
+                        }});
+                    }}, 5000);
+                    
+                    setTimeout(() => {{
+                        updateRebootProgressDisplay({{
+                            status: 'Device rebooted successfully',
+                            percentage: 100,
+                            completed: true,
+                            message: 'Firmware update applied successfully'
+                        }});
+                        // Reset firmware download progress after successful reboot
+                        updateProgressDisplay(null);
+                    }}, 8000);
                     
                     // TODO: Implement actual device reboot
                     // fetch('/reboot-device', {{
@@ -817,15 +916,25 @@ def index():
                     // }})
                     // .then(response => response.json())
                     // .then(result => {{
-                    //         if (result.success) {{
+                    //     if (result.success) {{
                     //         showPopup('Device reboot command sent successfully!', true);
                     //         updateProgressDisplay(null);
+                    //         // Start monitoring reboot progress
+                    //         startRebootProgressMonitoring(deviceId);
                     //     }} else {{
                     //         showPopup(result.message, false);
+                    //         updateRebootProgressDisplay({{
+                    //             status: 'Reboot failed',
+                    //             failed: true
+                    //         }});
                     //     }}
                     // }})
                     // .catch(error => {{
                     //     showPopup('Error sending reboot command: ' + error.message, false);
+                    //     updateRebootProgressDisplay({{
+                    //         status: 'Reboot failed',
+                    //         failed: true
+                    //     }});
                     // }});
                 }}
             }}
@@ -933,6 +1042,8 @@ def index():
             function updateLogs(logsData) {{
                 const configLogsContent = document.getElementById('configLogsContent');
                 const commandLogsContent = document.getElementById('commandLogsContent');
+                const firmwareDownloadLogsContent = document.getElementById('firmwareDownloadLogsContent');
+                const firmwareBootLogsContent = document.getElementById('firmwareBootLogsContent');
                 
                 // Update config logs
                 if (logsData.config_logs && logsData.config_logs.length > 0) {{
@@ -1017,6 +1128,114 @@ def index():
                     commandLogsContent.innerHTML = commandHTML;
                 }} else {{
                     commandLogsContent.innerHTML = '<div class="muted">No command execution results received yet.</div>';
+                }}
+                
+                // Update firmware download logs
+                if (logsData.firmware_download_logs && logsData.firmware_download_logs.length > 0) {{
+                    let downloadHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Device ID</th>
+                                    <th>Firmware Version</th>
+                                    <th>Download Status</th>
+                                    <th>File Size</th>
+                                    <th>Checksum Verified</th>
+                                    <th>Received At</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    logsData.firmware_download_logs.forEach(log => {{
+                        const downloadData = log.download_data || {{}};
+                        const status = downloadData.status || 'unknown';
+                        const version = downloadData.firmware_version || 'N/A';
+                        const fileSize = downloadData.file_size || 'N/A';
+                        const checksumVerified = downloadData.checksum_verified || false;
+                        
+                        // Color code the status
+                        let statusColor = '#7f8c8d'; // Default gray
+                        let statusText = status;
+                        if (status === 'success') {{
+                            statusColor = '#27ae60'; // Green
+                            statusText = '✅ Download Complete';
+                        }} else if (status === 'failure') {{
+                            statusColor = '#e74c3c'; // Red
+                            statusText = '❌ Download Failed';
+                        }} else if (status === 'in_progress') {{
+                            statusColor = '#3498db'; // Blue
+                            statusText = '⬇️ Downloading';
+                        }}
+                        
+                        downloadHTML += `
+                            <tr>
+                                <td class="device-id">${{log.device_id || 'Unknown'}}</td>
+                                <td>${{version}}</td>
+                                <td style="color: ${{statusColor}}; font-weight: bold;">${{statusText}}</td>
+                                <td>${{fileSize}} bytes</td>
+                                <td style="color: ${{checksumVerified ? '#27ae60' : '#e74c3c'}}; font-weight: bold;">${{checksumVerified ? '✅ Verified' : '❌ Failed'}}</td>
+                                <td>${{formatTimestamp(log.received_at)}}</td>
+                            </tr>
+                        `;
+                    }});
+                    downloadHTML += '</tbody></table>';
+                    firmwareDownloadLogsContent.innerHTML = downloadHTML;
+                }} else {{
+                    firmwareDownloadLogsContent.innerHTML = '<div class="muted">No firmware download verifications received yet.</div>';
+                }}
+                
+                // Update firmware boot logs
+                if (logsData.firmware_boot_logs && logsData.firmware_boot_logs.length > 0) {{
+                    let bootHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Device ID</th>
+                                    <th>Firmware Version</th>
+                                    <th>Boot Status</th>
+                                    <th>Boot Time</th>
+                                    <th>Error Message</th>
+                                    <th>Received At</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    logsData.firmware_boot_logs.forEach(log => {{
+                        const bootData = log.boot_data || {{}};
+                        const status = bootData.status || 'unknown';
+                        const version = bootData.firmware_version || 'N/A';
+                        const bootTime = bootData.boot_time || 'N/A';
+                        const errorMessage = bootData.error_message || 'None';
+                        
+                        // Color code the status
+                        let statusColor = '#7f8c8d'; // Default gray
+                        let statusText = status;
+                        if (status === 'success') {{
+                            statusColor = '#27ae60'; // Green
+                            statusText = '✅ Boot Successful';
+                        }} else if (status === 'failure') {{
+                            statusColor = '#e74c3c'; // Red
+                            statusText = '❌ Boot Failed';
+                        }} else if (status === 'rebooting') {{
+                            statusColor = '#f39c12'; // Orange
+                            statusText = '🔄 Rebooting';
+                        }}
+                        
+                        bootHTML += `
+                            <tr>
+                                <td class="device-id">${{log.device_id || 'Unknown'}}</td>
+                                <td>${{version}}</td>
+                                <td style="color: ${{statusColor}}; font-weight: bold;">${{statusText}}</td>
+                                <td>${{bootTime}}ms</td>
+                                <td style="color: ${{errorMessage === 'None' ? '#7f8c8d' : '#e74c3c'}}; font-style: ${{errorMessage === 'None' ? 'italic' : 'normal'}};">${{errorMessage}}</td>
+                                <td>${{formatTimestamp(log.received_at)}}</td>
+                            </tr>
+                        `;
+                    }});
+                    bootHTML += '</tbody></table>';
+                    firmwareBootLogsContent.innerHTML = bootHTML;
+                }} else {{
+                    firmwareBootLogsContent.innerHTML = '<div class="muted">No firmware boot confirmations received yet.</div>';
                 }}
             }}
 
@@ -1342,10 +1561,12 @@ def get_latest_data():
 
 @app.route("/api/logs", methods=["GET"])
 def get_logs():
-    """API endpoint to get the latest config and command logs"""
+    """API endpoint to get the latest config, command, and firmware logs"""
     return jsonify({
         "config_logs": CONFIG_LOGS[-10:],  # Last 10 config acknowledgments
-        "command_logs": COMMAND_LOGS[-10:]  # Last 10 command results
+        "command_logs": COMMAND_LOGS[-10:],  # Last 10 command results
+        "firmware_download_logs": FIRMWARE_DOWNLOAD_LOGS[-10:],  # Last 10 firmware download verifications
+        "firmware_boot_logs": FIRMWARE_BOOT_LOGS[-10:]  # Last 10 firmware boot confirmations
     })
 
 
