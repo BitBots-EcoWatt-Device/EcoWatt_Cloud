@@ -24,6 +24,48 @@ def delta_decode(deltas):
 def scale_back_float(scaled_int, scale):
     return scaled_int / (10.0 ** scale)
 
+def load_existing_firmware():
+    """Load existing firmware files from firmware_files directory on startup"""
+    global UPLOADED_FIRMWARE
+    firmware_dir = os.path.join(os.getcwd(), 'firmware_files')
+    
+    if not os.path.exists(firmware_dir):
+        return
+    
+    try:
+        for filename in os.listdir(firmware_dir):
+            if filename.endswith('.bin'):
+                filepath = os.path.join(firmware_dir, filename)
+                # Extract version from filename format: version_originalname.bin
+                if '_' in filename:
+                    version = filename.split('_', 1)[0]
+                    original_filename = filename.split('_', 1)[1]
+                else:
+                    # Fallback for files without version prefix
+                    version = "unknown"
+                    original_filename = filename
+                
+                # Get file modification time as upload time
+                file_stat = os.stat(filepath)
+                uploaded_at = datetime.fromtimestamp(file_stat.st_mtime, SRI_LANKA_TZ).isoformat()
+                
+                firmware_info = {
+                    "version": version,
+                    "filename": filename,
+                    "original_filename": original_filename,
+                    "filepath": filepath,
+                    "uploaded_at": uploaded_at
+                }
+                
+                # Check if this firmware is already in the list (avoid duplicates)
+                if not any(fw['filepath'] == filepath for fw in UPLOADED_FIRMWARE):
+                    UPLOADED_FIRMWARE.append(firmware_info)
+                    
+        print(f"[FIRMWARE] Loaded {len(UPLOADED_FIRMWARE)} existing firmware files from {firmware_dir}")
+        
+    except Exception as e:
+        print(f"[FIRMWARE] Error loading existing firmware files: {str(e)}")
+
 app = Flask(__name__)
 
 # In-memory database substitute
@@ -39,6 +81,9 @@ PENDING_COMMANDS = defaultdict(dict)
 CONFIG_LOGS = []
 # Stores command result logs from devices
 COMMAND_LOGS = []
+
+# NEW: Store uploaded firmware information
+UPLOADED_FIRMWARE = []  # List of {version, filename, filepath, uploaded_at}
 
 # Stores the PSK for each known device.
 DEVICE_PSKS = {
@@ -663,6 +708,8 @@ def index():
                         showPopup('', true, popupData);
                         // Reset the form
                         form.reset();
+                        // Refresh the firmware versions dropdown
+                        loadAvailableFirmwareVersions();
                     }} else {{
                         showPopup(result.message, false);
                     }}
@@ -784,8 +831,6 @@ def index():
             }}
 
             function loadAvailableFirmwareVersions() {{
-                // TODO: Fetch available firmware versions from backend
-                // For now, simulate with placeholder data
                 const versionSelect = document.getElementById('firmware_version_select');
                 
                 // Clear existing options except the first one
@@ -793,29 +838,44 @@ def index():
                     versionSelect.removeChild(versionSelect.lastChild);
                 }}
                 
-                // Add placeholder versions (these would come from backend)
-                const placeholderVersions = ['1.0.0', '1.1.0', '1.2.0'];
-                placeholderVersions.forEach(version => {{
-                    const option = document.createElement('option');
-                    option.value = version;
-                    option.textContent = `Version ${{version}}`;
-                    versionSelect.appendChild(option);
-                }});
-                
-                // TODO: Replace with actual backend call
-                // fetch('/api/firmware-versions')
-                //     .then(response => response.json())
-                //     .then(versions => {{
-                //         versions.forEach(version => {{
-                //             const option = document.createElement('option');
-                //             option.value = version.version;
-                //             option.textContent = `Version ${{version.version}} (${{version.filename}})`;
-                //             versionSelect.appendChild(option);
-                //         }});
-                //     }})
-                //     .catch(error => {{
-                //         console.error('Error loading firmware versions:', error);
-                //     }});
+                // Fetch available firmware versions from backend
+                fetch('/api/firmware-versions')
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.success && data.versions) {{
+                            if (data.versions.length === 0) {{
+                                // No firmware uploaded yet
+                                const option = document.createElement('option');
+                                option.value = '';
+                                option.textContent = 'No firmware versions available';
+                                option.disabled = true;
+                                versionSelect.appendChild(option);
+                            }} else {{
+                                // Add each uploaded firmware version
+                                data.versions.forEach(firmware => {{
+                                    const option = document.createElement('option');
+                                    option.value = firmware.version;
+                                    option.textContent = `Version ${{firmware.version}} (${{firmware.original_filename}})`;
+                                    versionSelect.appendChild(option);
+                                }});
+                            }}
+                        }} else {{
+                            console.error('Failed to load firmware versions:', data.message);
+                            const option = document.createElement('option');
+                            option.value = '';
+                            option.textContent = 'Error loading versions';
+                            option.disabled = true;
+                            versionSelect.appendChild(option);
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error loading firmware versions:', error);
+                        const option = document.createElement('option');
+                        option.value = '';
+                        option.textContent = 'Error loading versions';
+                        option.disabled = true;
+                        versionSelect.appendChild(option);
+                    }});
             }}
 
             function updateTable(data) {{
@@ -1137,6 +1197,16 @@ def upload_firmware():
         # Save the file
         file.save(filepath)
 
+        # Store firmware information for later retrieval
+        firmware_info = {
+            "version": firmware_version,
+            "filename": filename,
+            "original_filename": original_filename,
+            "filepath": filepath,
+            "uploaded_at": datetime.now(SRI_LANKA_TZ).isoformat()
+        }
+        UPLOADED_FIRMWARE.append(firmware_info)
+
         return jsonify({
             "success": True, 
             "message": f"Firmware version {firmware_version} uploaded successfully",
@@ -1146,6 +1216,19 @@ def upload_firmware():
 
     except Exception as e:
         return jsonify({"success": False, "message": f"Upload failed: {str(e)}"}), 500
+
+
+@app.route("/api/firmware-versions", methods=["GET"])
+def get_firmware_versions():
+    """Return list of available firmware versions"""
+    try:
+        # Return the stored firmware information
+        return jsonify({
+            "success": True,
+            "versions": UPLOADED_FIRMWARE
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed to retrieve versions: {str(e)}"}), 500
 
 
 @app.route("/upload", methods=["POST"])
@@ -1421,5 +1504,8 @@ def handle_config():
 
 
 if __name__ == "__main__":
+    # Load existing firmware files on startup
+    load_existing_firmware()
+    
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=True)
