@@ -552,7 +552,7 @@ def index():
                 <div class="cards">
                     <div class="card">
                         <h3>Error Emulation</h3>
-                        <form id="errorEmulationForm" onsubmit="event.preventDefault(); showPopup('Error emulation settings saved (preview only)', true);">
+                        <form id="errorEmulationForm" onsubmit="submitErrorFlagForm(event)">
                             <label for="error_type_select">Error Type:</label><br>
                             <select id="error_type_select" name="error_type">
                                 <option value="EXCEPTION">EXCEPTION</option>
@@ -581,9 +581,14 @@ def index():
                                 <input type="number" id="delay_ms_input" name="delay_ms" min="0" placeholder="e.g. 250"><br>
                             </div>
 
-                            <input type="submit" value="Apply Error Flag">
+                            <input type="submit" id="applyErrorFlagBtn" value="Apply Error Flag">
                         </form>
-                        <div class="muted" style="margin-top:8px; font-size:13px;">Note: This UI only configures the error emulation settings. The backend behaviour will be implemented later.</div>
+
+                        <!-- Last Applied Error Flag Status Card -->
+                        <div id="errorFlagStatusCard" style="margin-top:12px; padding:12px; background:#f8f9fa; border-radius:8px; border:1px solid #e9ecef;">
+                            <h4 style="margin:0 0 8px 0;">Last Applied Error Flag</h4>
+                            <div id="errorFlagStatus" class="muted">No error flag applied yet.</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1317,6 +1322,41 @@ def index():
             fetchLatestData();
             setInterval(fetchLatestData, 2000);
             
+            // Error Emulation status helpers
+            function getCurrentErrorFlagPayload() {{
+                const errorTypeEl = document.getElementById('error_type_select');
+                const exceptionEl = document.getElementById('exception_select');
+                const delayEl = document.getElementById('delay_ms_input');
+                const errorType = errorTypeEl ? errorTypeEl.value : 'EXCEPTION';
+
+                let exceptionCode = 0;
+                if (exceptionEl && !exceptionEl.disabled && exceptionEl.value) {{
+                    try {{ exceptionCode = parseInt(exceptionEl.value, 16); if (Number.isNaN(exceptionCode)) exceptionCode = 0; }} catch(e) {{ exceptionCode = 0; }}
+                }}
+
+                let delayMs = 0;
+                if (delayEl && delayEl.value) {{
+                    const parsed = parseInt(delayEl.value, 10);
+                    if (!Number.isNaN(parsed) && parsed >= 0) delayMs = parsed;
+                }}
+
+                return {{ errorType: errorType, exceptionCode: exceptionCode, delayMs: delayMs }};
+            }}
+
+            function updateErrorFlagStatusDisplay(payload, appliedAt = null) {{
+                const statusEl = document.getElementById('errorFlagStatus');
+                if (!statusEl) return;
+                if (!payload) payload = getCurrentErrorFlagPayload();
+
+                let lines = [];
+                lines.push(`<strong>Type:</strong> ${{payload.errorType}}`);
+                lines.push(`<strong>Exception Code:</strong> ${{payload.exceptionCode}}`);
+                lines.push(`<strong>Delay (ms):</strong> ${{payload.delayMs}}`);
+                if (appliedAt) lines.push(`<span style="display:block; margin-top:6px; font-size:12px; color:#444;">Last applied: ${{appliedAt}}</span>`);
+
+                statusEl.innerHTML = lines.join('<br>');
+            }}
+
             // Initialize Error Emulation UI handlers
             function initErrorEmulation() {{
                 const errorType = document.getElementById('error_type_select');
@@ -1347,9 +1387,73 @@ def index():
 
                 // Attach change handler
                 errorType.addEventListener('change', updateUI);
+                // Attach handlers to update the status card when form values change
+                try {{
+                    exceptionSelect.addEventListener && exceptionSelect.addEventListener('change', function() {{ updateErrorFlagStatusDisplay(getCurrentErrorFlagPayload()); }});
+                }} catch(e) {{}}
+                try {{
+                    const delayEl = document.getElementById('delay_ms_input');
+                    delayEl && delayEl.addEventListener && delayEl.addEventListener('input', function() {{ updateErrorFlagStatusDisplay(getCurrentErrorFlagPayload()); }});
+                }} catch(e) {{}}
 
-                // Initialize visibility
+                // Initialize visibility and status card
                 updateUI();
+                updateErrorFlagStatusDisplay(getCurrentErrorFlagPayload());
+            }}
+
+            // Submit Error Flag form to external API
+            function submitErrorFlagForm(evt) {{
+                evt.preventDefault();
+                const btn = document.getElementById('applyErrorFlagBtn') || null;
+                if (btn) btn.disabled = true;
+
+                const errorTypeEl = document.getElementById('error_type_select');
+                const exceptionEl = document.getElementById('exception_select');
+                const delayEl = document.getElementById('delay_ms_input');
+
+                const errorType = errorTypeEl ? errorTypeEl.value : 'EXCEPTION';
+
+                // exception code: convert hex string value to integer; default 0
+                let exceptionCode = 0;
+                if (exceptionEl && !exceptionEl.disabled && exceptionEl.value) {{
+                    try {{ exceptionCode = parseInt(exceptionEl.value, 16); if (Number.isNaN(exceptionCode)) exceptionCode = 0; }} catch(e) {{ exceptionCode = 0; }}
+                }}
+
+                let delayMs = 0;
+                if (delayEl && delayEl.value) {{
+                    const parsed = parseInt(delayEl.value, 10);
+                    if (!Number.isNaN(parsed) && parsed >= 0) delayMs = parsed;
+                }}
+
+                const payload = {{ errorType: errorType, exceptionCode: exceptionCode, delayMs: delayMs }};
+
+                const API_URL = 'http://20.15.114.131:8080/api/user/error-flag/add';
+                const API_KEY = 'NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==';
+
+                showPopup('Sending error flag...', true);
+
+                fetch(API_URL, {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'Authorization': API_KEY,
+                        'Accept': '*/*'
+                    }},
+                    body: JSON.stringify(payload)
+                }})
+                .then(response => {{
+                    if (response.ok) {{
+                        const appliedAt = new Date().toLocaleString();
+                        showPopup('Error flag applied successfully', true);
+                        try {{ updateErrorFlagStatusDisplay(payload, appliedAt); }} catch(e) {{}}
+                    }} else {{
+                        showPopup('Failed to apply error flag (status ' + response.status + ')', false);
+                    }}
+                }})
+                .catch(error => {{
+                    showPopup('Network error sending error flag: ' + (error.message || error), false);
+                }})
+                .finally(() => {{ if (btn) btn.disabled = false; }});
             }}
 
             // Load available firmware versions on page load
