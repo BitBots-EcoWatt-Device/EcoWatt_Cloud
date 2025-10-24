@@ -384,6 +384,7 @@ def index():
         <div class="tab-navigation">
             <button class="tab-button active" onclick="openTab(event, 'device-config-tab')">Device Configurations</button>
             <button class="tab-button" onclick="openTab(event, 'firmware-update-tab')">Firmware Update</button>
+            <button class="tab-button" onclick="openTab(event, 'error-emulation-tab')">Error Emulation</button>
         </div>
         
         <div class="container">
@@ -542,6 +543,47 @@ def index():
                     <h3>Firmware Boot Confirmation Logs</h3>
                     <div id="firmwareBootLogsContent">
                         <div class="muted">No firmware boot confirmations received yet.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error Emulation Tab Content -->
+            <div id="error-emulation-tab" class="tab-content">
+                <div class="cards">
+                    <div class="card">
+                        <h3>Error Emulation</h3>
+                        <form id="errorEmulationForm" onsubmit="event.preventDefault(); showPopup('Error emulation settings saved (preview only)', true);">
+                            <label for="error_type_select">Error Type:</label><br>
+                            <select id="error_type_select" name="error_type">
+                                <option value="EXCEPTION">EXCEPTION</option>
+                                <option value="CRC_ERROR">CRC_ERROR</option>
+                                <option value="CORRUPT">CORRUPT</option>
+                                <option value="PACKET_DROP">PACKET_DROP</option>
+                                <option value="DELAY">DELAY</option>
+                            </select><br><br>
+
+                            <label for="exception_select" id="exception_label" style="display:none;">Exception Code:</label><br>
+                            <select id="exception_select" name="exception_code" style="display:none;" disabled>
+                                <!-- Visible text is the meaning; value is the hex code to be used later -->
+                                <option value="01">01 - Illegal Function (function not supported)</option>
+                                <option value="02">02 - Illegal Data Address (address not valid)</option>
+                                <option value="03">03 - Illegal Data Value (value out of range)</option>
+                                <option value="04">04 - Slave Device Failure</option>
+                                <option value="05">05 - Acknowledge (request accepted, processing delayed)</option>
+                                <option value="06">06 - Slave Device Busy</option>
+                                <option value="08">08 - Memory Parity Error</option>
+                                <option value="0A">0A - Gateway Path Unavailable</option>
+                                <option value="0B">0B - Gateway Target Device Failed to Respond</option>
+                            </select>
+
+                            <div id="delay_container" style="display:none; margin-top:8px;">
+                                <label for="delay_ms_input">Delay (milliseconds):</label><br>
+                                <input type="number" id="delay_ms_input" name="delay_ms" min="0" placeholder="e.g. 250"><br>
+                            </div>
+
+                            <input type="submit" value="Apply Error Flag">
+                        </form>
+                        <div class="muted" style="margin-top:8px; font-size:13px;">Note: This UI only configures the error emulation settings. The backend behaviour will be implemented later.</div>
                     </div>
                 </div>
             </div>
@@ -1275,8 +1317,46 @@ def index():
             fetchLatestData();
             setInterval(fetchLatestData, 2000);
             
+            // Initialize Error Emulation UI handlers
+            function initErrorEmulation() {{
+                const errorType = document.getElementById('error_type_select');
+                const exceptionSelect = document.getElementById('exception_select');
+                const exceptionLabel = document.getElementById('exception_label');
+                const delayContainer = document.getElementById('delay_container');
+
+                function updateUI() {{
+                    const val = errorType.value;
+                    if (val === 'EXCEPTION') {{
+                        exceptionSelect.style.display = 'block';
+                        exceptionLabel.style.display = 'block';
+                        exceptionSelect.disabled = false;
+                        delayContainer.style.display = 'none';
+                    }} else if (val === 'DELAY') {{
+                        exceptionSelect.style.display = 'none';
+                        exceptionLabel.style.display = 'none';
+                        exceptionSelect.disabled = true;
+                        delayContainer.style.display = 'block';
+                    }} else {{
+                        // Other error types: hide/disable both
+                        exceptionSelect.style.display = 'none';
+                        exceptionLabel.style.display = 'none';
+                        exceptionSelect.disabled = true;
+                        delayContainer.style.display = 'none';
+                    }}
+                }}
+
+                // Attach change handler
+                errorType.addEventListener('change', updateUI);
+
+                // Initialize visibility
+                updateUI();
+            }}
+
             // Load available firmware versions on page load
             loadAvailableFirmwareVersions();
+
+            // Initialize Error Emulation UI after DOM elements are created
+            try {{ initErrorEmulation(); }} catch(e) {{ console.warn('Error initializing Error Emulation UI', e); }}
         </script>
     </body>
     </html>
